@@ -1,6 +1,7 @@
 //! Catppuccin Mocha, hardcoded for now. Helix-theme loading comes later.
 
-use gpui::{rgb, rgba, Rgba};
+use gpui::{rgb, rgba, App, Hsla, Rgba};
+use gpui_component::{Theme, ThemeMode};
 
 pub fn base() -> Rgba {
     rgb(0x1e1e2e)
@@ -37,6 +38,74 @@ pub fn mauve() -> Rgba {
 }
 pub fn peach() -> Rgba {
     rgb(0xfab387)
+}
+
+/// Override gpui-component's theme (dark mode, default shadcn palette) with
+/// Catppuccin Mocha. Call after `gpui_component::init`.
+pub fn apply_ui_theme(cx: &mut App) {
+    Theme::change(ThemeMode::Dark, None, cx);
+
+    let base: Hsla = base().into();
+    let mantle: Hsla = mantle().into();
+    let crust: Hsla = crust().into();
+    let surface0: Hsla = surface0().into();
+    let text: Hsla = text().into();
+    let overlay0: Hsla = overlay0().into();
+    let green: Hsla = green().into();
+    let red: Hsla = red().into();
+    let blue: Hsla = blue().into();
+    let peach: Hsla = peach().into();
+
+    let theme = Theme::global_mut(cx);
+    theme.background = base;
+    theme.foreground = text;
+    theme.muted = surface0;
+    theme.muted_foreground = overlay0;
+    theme.border = surface0;
+    theme.input = surface0;
+    theme.ring = blue;
+    theme.primary = blue;
+    theme.primary_hover = blue.opacity(0.9);
+    theme.primary_active = blue.opacity(0.8);
+    theme.primary_foreground = crust;
+    theme.secondary = surface0;
+    theme.secondary_hover = surface0.opacity(0.8);
+    theme.secondary_active = surface0.opacity(0.6);
+    theme.secondary_foreground = text;
+    theme.accent = surface0;
+    theme.accent_foreground = text;
+    theme.danger = red;
+    theme.danger_hover = red.opacity(0.9);
+    theme.danger_active = red.opacity(0.8);
+    theme.danger_foreground = crust;
+    theme.success = green;
+    theme.success_hover = green.opacity(0.9);
+    theme.success_active = green.opacity(0.8);
+    theme.success_foreground = crust;
+    theme.warning = peach;
+    theme.warning_hover = peach.opacity(0.9);
+    theme.warning_active = peach.opacity(0.8);
+    theme.warning_foreground = crust;
+    theme.info = blue;
+    theme.info_hover = blue.opacity(0.9);
+    theme.info_active = blue.opacity(0.8);
+    theme.info_foreground = crust;
+    theme.link = blue;
+    theme.link_hover = blue.opacity(0.9);
+    theme.link_active = blue.opacity(0.8);
+    theme.popover = mantle;
+    theme.popover_foreground = text;
+    theme.title_bar = mantle;
+    theme.title_bar_border = surface0;
+    theme.sidebar = mantle;
+    theme.sidebar_foreground = text;
+    theme.sidebar_border = surface0;
+    theme.caret = text;
+    theme.selection = blue.opacity(0.3);
+    theme.scrollbar = crust.opacity(0.6);
+    theme.scrollbar_thumb = overlay0.opacity(0.5);
+    theme.scrollbar_thumb_hover = overlay0;
+    theme.window_border = surface0;
 }
 
 /// Low-alpha tints: syntax/text must stay readable on top. Never opaque.

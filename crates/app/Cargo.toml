@@ -12,3 +12,5 @@ anyhow = { workspace = true }
 diff-core = { path = "../diff-core" }
 gh = { path = "../gh" }
 gpui = "0.2"
+gpui-component = "0.5"
+gpui-component-assets = "0.5"

@@ -3,9 +3,16 @@ mod theme;
 use diff_core::{DiffRow, FileStatus, PrDiff};
 use gpui::{
     actions, div, prelude::*, px, size, uniform_list, App, Application, Bounds, Context,
-    FocusHandle, HighlightStyle, KeyBinding, ListHorizontalSizingBehavior, ScrollStrategy,
-    SharedString, StyledText, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions,
+    FocusHandle, HighlightStyle, Hsla, KeyBinding, Keystroke, ListHorizontalSizingBehavior,
+    ScrollStrategy, SharedString, StyledText, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions,
+};
+use gpui_component::{
+    button::{Button, ButtonVariants as _},
+    kbd::Kbd,
+    scroll::Scrollbar,
+    tag::Tag,
+    IconName, Root, Sizable as _, TitleBar,
 };
 use std::ops::Range;
 
@@ -43,37 +50,41 @@ fn main() {
     )
     .into();
 
-    Application::new().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("]", NextFile, Some("ReviewApp")),
-            KeyBinding::new("[", PrevFile, Some("ReviewApp")),
-            KeyBinding::new("n", NextHunk, Some("ReviewApp")),
-            KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
-            KeyBinding::new("home", GoToTop, Some("ReviewApp")),
-            KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
-            KeyBinding::new("cmd-q", Quit, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+    Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            theme::apply_ui_theme(cx);
+            cx.bind_keys([
+                KeyBinding::new("]", NextFile, Some("ReviewApp")),
+                KeyBinding::new("[", PrevFile, Some("ReviewApp")),
+                KeyBinding::new("n", NextHunk, Some("ReviewApp")),
+                KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
+                KeyBinding::new("home", GoToTop, Some("ReviewApp")),
+                KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
 
-        let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(window_title.clone()),
+            let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(window_title.clone()),
+                        ..TitleBar::title_bar_options()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| ReviewApp::new(meta, &diff, cx));
-                window.focus(&view.read(cx).focus_handle);
-                view
-            },
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| ReviewApp::new(meta, &diff, cx));
+                    window.focus(&view.read(cx).focus_handle);
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }
 
 fn die<E: std::fmt::Display, T>(err: E) -> T {
@@ -245,6 +256,7 @@ impl ReviewApp {
                     FileStatus::Renamed => ("renamed", theme::mauve()),
                     FileStatus::Binary => ("binary", theme::peach()),
                 };
+                let status: Hsla = status_color.into();
                 let mut header = div()
                     .h(row_height)
                     .flex()
@@ -253,8 +265,8 @@ impl ReviewApp {
                     .px_3()
                     .bg(theme::mantle())
                     .child(
-                        div()
-                            .text_color(status_color)
+                        Tag::custom(status.opacity(0.15), status, status.opacity(0.4))
+                            .small()
                             .child(SharedString::from(status_label)),
                     )
                     .child(
@@ -371,7 +383,7 @@ impl ReviewApp {
         }
     }
 
-    fn render_header(&self) -> impl IntoElement {
+    fn render_titlebar(&self) -> impl IntoElement {
         let meta = &self.meta;
         let (state_color, state_label) = match meta.state.as_str() {
             "OPEN" => (theme::green(), "open"),
@@ -379,54 +391,96 @@ impl ReviewApp {
             "CLOSED" => (theme::red(), "closed"),
             other => (theme::overlay0(), other),
         };
+        let state: Hsla = state_color.into();
+        let url = meta.url.clone();
+        TitleBar::new()
+            .text_size(px(13.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        Tag::custom(state.opacity(0.15), state, state.opacity(0.4))
+                            .small()
+                            .child(SharedString::from(state_label.to_string())),
+                    )
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .truncate()
+                            .child(SharedString::from(meta.title.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::subtext())
+                            .child(SharedString::from(format!("#{}", meta.number))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::subtext())
+                            .whitespace_nowrap()
+                            .child(SharedString::from(format!("by {}", meta.author.login))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .pr_3()
+                    .child(div().text_color(theme::overlay0()).child(SharedString::from(
+                        format!("{} ← {}", meta.base_ref_name, meta.head_ref_name),
+                    )))
+                    .child(
+                        div()
+                            .text_color(theme::green())
+                            .child(SharedString::from(format!("+{}", meta.additions))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::red())
+                            .child(SharedString::from(format!("−{}", meta.deletions))),
+                    )
+                    .child(
+                        Button::new("open-in-browser")
+                            .icon(IconName::ExternalLink)
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+            )
+    }
+
+    fn render_footer(&self) -> impl IntoElement {
+        let hint = |keys: &[&str], label: &'static str| {
+            let mut hint = div().flex().items_center().gap_1();
+            for key in keys {
+                hint = hint.child(Kbd::new(Keystroke::parse(key).unwrap()));
+            }
+            hint.child(
+                div()
+                    .text_color(theme::overlay0())
+                    .child(SharedString::from(label)),
+            )
+        };
         div()
-            .h(px(44.))
+            .h(px(28.))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_3()
-            .px_4()
+            .gap_4()
+            .px_3()
             .bg(theme::mantle())
-            .border_b_1()
+            .border_t_1()
             .border_color(theme::surface0())
-            .child(
-                div()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .bg(theme::surface0())
-                    .text_color(state_color)
-                    .child(SharedString::from(state_label.to_string())),
-            )
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(SharedString::from(meta.title.clone())),
-            )
-            .child(
-                div()
-                    .text_color(theme::subtext())
-                    .child(SharedString::from(format!("#{}", meta.number))),
-            )
-            .child(
-                div()
-                    .text_color(theme::subtext())
-                    .child(SharedString::from(format!("by {}", meta.author.login))),
-            )
-            .child(div().flex_1())
-            .child(div().text_color(theme::overlay0()).child(SharedString::from(
-                format!("{} ← {}", meta.base_ref_name, meta.head_ref_name),
-            )))
-            .child(
-                div()
-                    .text_color(theme::green())
-                    .child(SharedString::from(format!("+{}", meta.additions))),
-            )
-            .child(
-                div()
-                    .text_color(theme::red())
-                    .child(SharedString::from(format!("−{}", meta.deletions))),
-            )
+            .text_size(px(12.))
+            .child(hint(&["]", "["], "files"))
+            .child(hint(&["n", "p"], "hunks"))
+            .child(hint(&["home", "end"], "top/bottom"))
     }
 }
 
@@ -439,9 +493,6 @@ impl Render for ReviewApp {
             .flex_col()
             .bg(theme::base())
             .text_color(theme::text())
-            .font_family(MONO)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(ROW_HEIGHT))
             .track_focus(&self.focus_handle)
             .key_context("ReviewApp")
             .on_action(cx.listener(|this, _: &NextFile, _, cx| {
@@ -465,17 +516,28 @@ impl Render for ReviewApp {
                 let last = this.rows.len().saturating_sub(1);
                 this.jump(last, cx)
             }))
-            .child(self.render_header())
+            .child(self.render_titlebar())
             .child(
-                div().flex_1().min_h_0().child(
-                    uniform_list("diff", self.rows.len(), move |range, _window, cx| {
-                        let this = entity.read(cx);
-                        range.map(|ix| this.render_row(ix)).collect()
-                    })
-                    .track_scroll(self.scroll.clone())
-                    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                    .h_full(),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .font_family(MONO)
+                    .text_size(px(TEXT_SIZE))
+                    .line_height(px(ROW_HEIGHT))
+                    .child(
+                        uniform_list("diff", self.rows.len(), move |range, _window, cx| {
+                            let this = entity.read(cx);
+                            range.map(|ix| this.render_row(ix)).collect()
+                        })
+                        .track_scroll(self.scroll.clone())
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .h_full(),
+                    )
+                    .child(Scrollbar::new(&self.scroll)),
             )
+            .child(self.render_footer())
     }
 }
