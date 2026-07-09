@@ -36,11 +36,12 @@ uniform, which is what makes rendering fast).
 crates/
   diff-core/    # no UI deps: diff model, patch parser, intra-line diff, highlighting
   gh/           # gh CLI wrapper: PR metadata, patch, blob fetch, disk cache
+  git/          # git CLI wrapper: local repo diffs (branch vs default remote head)
   app/          # gpui binary: views, theme, keymap
 ```
 
-`diff-core` and `gh` stay UI-free so the diff pipeline is unit-testable and
-benchable with `cargo bench` against real PR corpora. No traits between the
+`diff-core`, `gh`, and `git` stay UI-free so the diff pipeline is unit-testable
+and benchable with `cargo bench` against real PR corpora. No traits between the
 crates — `app` calls concrete functions.
 
 ## Data model (`diff-core`)
@@ -207,25 +208,38 @@ switch < 50 ms from cache.
 
 ## App structure (gpui)
 
+The app is a small workspace: many review items open at once, one visible.
+
 ```
-Workspace (root view)
-├── TitleBar        — PR title/#/author/branches/state, open-in-browser
-├── FileTree        — left sidebar: directory-grouped, collapsible,
-│                     status color + additions/deletions per file,
-│                     fuzzy filter (/), j/k + enter
-├── DiffView        — the uniform_list described above
-└── PrPicker        — modal (cmd-p / on launch with no args):
-                      accepts "owner/repo#123", "#123" (repo inferred from
-                      cwd git remote), or a full PR URL
+ReviewApp (root view)
+├── TitleBar        — active item: PR title/#/author/branches/state +
+│                     open-in-browser, or local repo dir/branch ← base;
+│                     app name only while loading / with no items;
+│                     subtle "reloading…" note while a refresh is in flight
+├── Sidebar (cmd-b) — ~260px left panel: open-input at the top (cmd-t focuses
+│                     it from anywhere), then one entry per item — status dot
+│                     (PR open/merged/closed colors, blue for local),
+│                     owner/repo#N or branch, title/dir secondary line,
+│                     +N −M when loaded, ✕ to close (cmd-w closes active),
+│                     ctrl-tab / ctrl-shift-tab cycle items
+└── DiffView        — the uniform_list described above, per-item
 ```
 
-State: a single `Entity<ReviewState>` (PR metadata, `PrDiff`, per-file load
-phase, selection) owned by `Workspace`; views observe it. Background tasks
-message back via `cx.spawn` + `entity.update`. No message bus, no trait
-indirection — concrete gpui entities.
+State: `ReviewApp` owns `Vec<ReviewItem>` + the active index. Each item is a
+source (`Pr(gh::PrLocator)` or `Local(git::LocalSource)` — a plain enum, no
+provider traits) plus a state machine: `Loading | Ready(ItemData) |
+Failed(msg)`. `ItemData` holds everything the pane needs for one diff — meta,
+`PrDiff`, built display rows, cursor, view mode, and its own scroll handle, so
+per-item scroll position/mode survive switching. Fetching runs through
+`cx.spawn(async |this, cx| …)` with the blocking subprocess work and
+tree-sitter row building inside `cx.background_spawn(…)`; completion swaps
+Loading→Ready (or Failed with the gh/git stderr) via `this.update` +
+`cx.notify()`. `r` refreshes the active item in place — old data stays visible
+and scroll/cursor/mode are preserved when the new diff lands.
 
 **Keymap (v1)**: `j/k` line, `n/p` next/prev hunk, `]/[` next/prev file,
-`v` unified↔split, `x` expand context, `cmd-p` PR picker, `cmd-c` copy,
+`v` unified↔split, `x` expand context, `cmd-t` open input, `cmd-b` sidebar,
+`cmd-w` close item, `ctrl-tab` cycle items, `r` refresh, `cmd-c` copy,
 `o` open file@line on GitHub, `-/=` font size.
 
 ## Highlighting & theming (it has to be pretty)
@@ -272,13 +286,19 @@ radii, hunk headers as quiet full-width separators rather than loud bars.
 ## CLI entry
 
 ```
-review owner/repo#123
+review owner/repo#123 …    # any number of sources; each opens as an item
 review 123                 # repo from cwd origin remote
 review <github pr url>
-review                     # open with PR picker
+review . ./sub /abs/path   # any existing directory → local diff of that repo
+review                     # cwd in a git repo → local diff of it;
+                           # otherwise open empty ("⌘T to open a PR or path")
 ```
 
-Errors surface in-app with the `gh` stderr attached ("gh not found", "not
+The window opens immediately; every source loads asynchronously as a sidebar
+item. Local diffs show the branch's divergence from the default remote head
+(merge-base two-dot diff + staged + unstaged + untracked — the PR you'd open),
+falling back to a working-tree-only diff when there's no remote. Errors
+surface in-app with the `gh`/`git` stderr attached ("gh not found", "not
 authenticated — run `gh auth login`", 404, rate limit).
 
 ## Future seams (not built now, not blocked either)
@@ -301,8 +321,9 @@ decoration list — the pipeline doesn't reshape for any of it.
   as the file viewer for free. Expect degraded servers for languages that
   need installed deps; that's inherent to remote review.
 - **Comments/threads**: same anchor triple; GitHub review API via `gh api`.
-- **Local diffs** (`review .` for the working tree): the pipeline from Phase 2
-  onward is source-agnostic — only the fetch layer differs.
+- **Local diffs** — ✅ shipped: `review .` (or any repo path) renders the
+  branch's diff against the default remote head via the `git` crate; the rest
+  of the pipeline is shared with PRs, exactly as predicted.
 
 **Selection is v1, not a seam**: "ask AI about this" and plain cmd-c both need
 cross-row text selection, and `uniform_list` rows are independent elements —

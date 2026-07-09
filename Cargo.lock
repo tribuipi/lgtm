@@ -2091,6 +2091,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "diff-core",
+ "tempfile",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4760,6 +4769,7 @@ dependencies = [
  "anyhow",
  "diff-core",
  "gh",
+ "git",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
