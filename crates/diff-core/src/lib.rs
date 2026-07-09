@@ -184,6 +184,112 @@ pub fn parse_patch(patch: &str) -> PrDiff {
     PrDiff { files }
 }
 
+/// Authoritative diff of two complete file contents into hunks with `context`
+/// lines of surrounding context, merging hunks whose context overlaps or
+/// touches (git semantics). Line endings are normalized first: lines are
+/// compared without their terminators (`str::lines`, which strips both `\n`
+/// and `\r\n`), so a CRLF↔LF flip produces no hunks. Consequence, chosen and
+/// documented: a difference only in the presence of a trailing newline is
+/// invisible to this diff — both `"a\nb"` and `"a\nb\n"` are the lines
+/// `["a", "b"]`. Row texts never include terminators.
+pub fn diff_texts(old: &str, new: &str, context: u32) -> Vec<Hunk> {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    let mut input = InternedInput::default();
+    input.update_before(old_lines.iter().copied());
+    input.update_after(new_lines.iter().copied());
+
+    // Changed regions, as 0-based line ranges on each side.
+    let mut changes: Vec<(Range<u32>, Range<u32>)> = Vec::new();
+    imara_diff::diff(
+        Algorithm::Histogram,
+        &input,
+        |before: Range<u32>, after: Range<u32>| changes.push((before, after)),
+    );
+    if changes.is_empty() {
+        return Vec::new();
+    }
+
+    // Group changes into hunks: two changes share a hunk when the context
+    // lines around them overlap or touch (gap between them ≤ 2 * context).
+    let mut groups: Vec<Range<usize>> = Vec::new();
+    let mut start = 0;
+    for ix in 1..changes.len() {
+        if changes[ix].0.start - changes[ix - 1].0.end > 2 * context {
+            groups.push(start..ix);
+            start = ix;
+        }
+    }
+    groups.push(start..changes.len());
+
+    let mut hunks = Vec::new();
+    for group in groups {
+        let first = &changes[group.start];
+        let last = &changes[group.end - 1];
+        // Context clamps at file boundaries.
+        let old_lo = first.0.start.saturating_sub(context);
+        let old_hi = (last.0.end + context).min(old_lines.len() as u32);
+        let new_lo = first.1.start.saturating_sub(context);
+        let new_hi = (last.1.end + context).min(new_lines.len() as u32);
+
+        let mut rows = Vec::new();
+        let (mut old_no, mut new_no) = (old_lo, new_lo); // 0-based cursors
+        for (before, after) in &changes[group] {
+            // Shared context up to this change (identical on both sides).
+            while old_no < before.start {
+                rows.push(DiffRow::Context {
+                    old_no: old_no + 1,
+                    new_no: new_no + 1,
+                    text: old_lines[old_no as usize].to_string(),
+                });
+                old_no += 1;
+                new_no += 1;
+            }
+            for no in before.clone() {
+                rows.push(DiffRow::Removed {
+                    old_no: no + 1,
+                    text: old_lines[no as usize].to_string(),
+                    intra: Vec::new(),
+                });
+            }
+            for no in after.clone() {
+                rows.push(DiffRow::Added {
+                    new_no: no + 1,
+                    text: new_lines[no as usize].to_string(),
+                    intra: Vec::new(),
+                });
+            }
+            old_no = before.end;
+            new_no = after.end;
+        }
+        while old_no < old_hi {
+            rows.push(DiffRow::Context {
+                old_no: old_no + 1,
+                new_no: new_no + 1,
+                text: old_lines[old_no as usize].to_string(),
+            });
+            old_no += 1;
+            new_no += 1;
+        }
+        compute_intra_line(&mut rows);
+
+        let old_count = old_hi - old_lo;
+        let new_count = new_hi - new_lo;
+        hunks.push(Hunk {
+            // Git convention: a zero-count side records the line *before* the
+            // hunk (0 when at file start), otherwise the 1-based first line.
+            old_start: if old_count == 0 { old_lo } else { old_lo + 1 },
+            old_count,
+            new_start: if new_count == 0 { new_lo } else { new_lo + 1 },
+            new_count,
+            section: String::new(),
+            rows,
+        });
+    }
+    hunks
+}
+
 /// `a/old b/new`, possibly with `"`-quoted paths. Best-effort: the definitive
 /// paths come from `---`/`+++`/`rename` lines when present.
 fn parse_git_paths(rest: &str) -> (Option<String>, Option<String>) {
@@ -497,6 +603,142 @@ index 6666666..7777777 100644
             DiffRow::Added { intra, .. } => assert_eq!(intra, &vec![0..3]),
             other => panic!("expected added row, got {other:?}"),
         }
+    }
+
+    fn lines(n: Range<u32>) -> String {
+        n.map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[test]
+    fn diff_texts_identical_produces_no_hunks() {
+        let text = lines(1..20);
+        assert!(diff_texts(&text, &text, 3).is_empty());
+        assert!(diff_texts("", "", 3).is_empty());
+    }
+
+    #[test]
+    fn diff_texts_single_change_mid_file() {
+        let old = lines(1..21);
+        let new = old.replace("line 10\n", "line ten\n");
+        let hunks = diff_texts(&old, &new, 3);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        assert_eq!((h.old_start, h.old_count, h.new_start, h.new_count), (7, 7, 7, 7));
+        assert_eq!(h.rows.len(), 8); // 3 ctx + 1 removed + 1 added + 3 ctx
+        match &h.rows[0] {
+            DiffRow::Context { old_no, new_no, text } => {
+                assert_eq!((*old_no, *new_no), (7, 7));
+                assert_eq!(text, "line 7");
+            }
+            other => panic!("expected context, got {other:?}"),
+        }
+        match &h.rows[3] {
+            DiffRow::Removed { old_no, text, intra } => {
+                assert_eq!(*old_no, 10);
+                assert_eq!(text, "line 10");
+                // Intra-line pass ran on the paired change.
+                assert!(!intra.is_empty());
+            }
+            other => panic!("expected removed, got {other:?}"),
+        }
+        match &h.rows[4] {
+            DiffRow::Added { new_no, text, .. } => {
+                assert_eq!(*new_no, 10);
+                assert_eq!(text, "line ten");
+            }
+            other => panic!("expected added, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_texts_merges_close_changes_and_splits_far_ones() {
+        let old = lines(1..30);
+        // Changes at lines 10 and 16: gap of 5 unchanged lines ≤ 2*3 → merge.
+        let new = old
+            .replace("line 10\n", "line X\n")
+            .replace("line 16\n", "line Y\n");
+        let hunks = diff_texts(&old, &new, 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_start, 7);
+        assert_eq!(hunks[0].old_count, 13); // lines 7..=19
+
+        // Changes at lines 5 and 20: gap of 14 > 6 → two hunks.
+        let new = old
+            .replace("line 5\n", "line X\n")
+            .replace("line 20\n", "line Y\n");
+        let hunks = diff_texts(&old, &new, 3);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!((hunks[0].old_start, hunks[0].old_count), (2, 7));
+        assert_eq!((hunks[1].old_start, hunks[1].old_count), (17, 7));
+    }
+
+    #[test]
+    fn diff_texts_clamps_context_at_file_edges() {
+        let old = lines(1..10);
+        let new = old.replace("line 1\n", "line one\n");
+        let hunks = diff_texts(&old, &new, 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].old_start, hunks[0].old_count), (1, 4)); // 1 change + 3 trailing ctx
+
+        let new = old.replace("line 9\n", "line nine\n");
+        let hunks = diff_texts(&old, &new, 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].old_start, hunks[0].old_count), (6, 4)); // 3 leading ctx + 1 change
+    }
+
+    #[test]
+    fn diff_texts_crlf_produces_no_phantom_hunks() {
+        let old = "alpha\r\nbeta\r\ngamma\r\n";
+        let new = "alpha\nbeta\ngamma\n";
+        assert!(diff_texts(old, new, 3).is_empty());
+        // Mixed endings plus a real change: exactly the real change, no \r in texts.
+        let new = "alpha\nbeta!\ngamma\n";
+        let hunks = diff_texts(old, new, 3);
+        assert_eq!(hunks.len(), 1);
+        for row in &hunks[0].rows {
+            let text = match row {
+                DiffRow::Context { text, .. }
+                | DiffRow::Added { text, .. }
+                | DiffRow::Removed { text, .. } => text,
+            };
+            assert!(!text.contains('\r'), "phantom CR in {text:?}");
+        }
+    }
+
+    #[test]
+    fn diff_texts_trailing_newline_semantics() {
+        // Documented choice: trailing-newline-only differences are invisible.
+        assert!(diff_texts("a\nb\n", "a\nb", 3).is_empty());
+        // A real change in a file without a trailing newline doesn't panic and
+        // still includes the last line.
+        let hunks = diff_texts("a\nb\nc", "a\nB\nc", 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].old_start, hunks[0].old_count), (1, 3));
+        match hunks[0].rows.last().unwrap() {
+            DiffRow::Context { old_no, new_no, text } => {
+                assert_eq!((*old_no, *new_no), (3, 3));
+                assert_eq!(text, "c");
+            }
+            other => panic!("expected context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_texts_added_and_deleted_files() {
+        // Old side empty (added file): zero-count side records line 0.
+        let hunks = diff_texts("", "a\nb\n", 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            (hunks[0].old_start, hunks[0].old_count, hunks[0].new_start, hunks[0].new_count),
+            (0, 0, 1, 2)
+        );
+        assert!(hunks[0].rows.iter().all(|r| matches!(r, DiffRow::Added { .. })));
+        // Deleted file mirrors it.
+        let hunks = diff_texts("a\nb\n", "", 3);
+        assert_eq!(
+            (hunks[0].old_start, hunks[0].old_count, hunks[0].new_start, hunks[0].new_count),
+            (1, 2, 0, 0)
+        );
     }
 
     #[test]

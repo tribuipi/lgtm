@@ -17,6 +17,10 @@ pub struct LocalSource {
     /// exists and shares history with HEAD, otherwise "HEAD" (working-tree-only
     /// diff).
     pub base_label: String,
+    /// Commit oid of the diff base, captured at resolve time: the merge-base
+    /// with the remote head, or HEAD itself. None only in a repo with no
+    /// commits yet (old side of every file is then absent).
+    pub base_oid: Option<String>,
 }
 
 /// Resolve a path inside a git repo to its root, current branch, and diff base.
@@ -41,29 +45,55 @@ pub fn resolve_local(path: &Path) -> Result<LocalSource> {
     }
     candidates.push("origin/main".to_string());
     candidates.push("origin/master".to_string());
-    let base_label = candidates
-        .into_iter()
-        .find(|cand| git(&repo_root, &["merge-base", "HEAD", cand]).is_ok())
-        .unwrap_or_else(|| "HEAD".to_string());
+    let mut base_oid = None;
+    let mut base_label = "HEAD".to_string();
+    for cand in candidates {
+        if let Ok(oid) = git(&repo_root, &["merge-base", "HEAD", &cand]) {
+            base_oid = Some(oid.trim().to_string());
+            base_label = cand;
+            break;
+        }
+    }
+    if base_oid.is_none() {
+        // Working-tree-only diff; a repo with zero commits has no HEAD oid.
+        base_oid = git(&repo_root, &["rev-parse", "HEAD"])
+            .ok()
+            .map(|oid| oid.trim().to_string());
+    }
 
     Ok(LocalSource {
         repo_root,
         branch,
         base_label,
+        base_oid,
     })
+}
+
+/// Full contents of `path` at the captured diff base, for the Phase-2 upgrade.
+/// None means "old side absent or unusable": untracked/added files, binary or
+/// non-UTF-8 content, or no base commit. Errors collapse to None too — the
+/// caller keeps that file's patch-derived view.
+pub fn file_at_base(src: &LocalSource, path: &str) -> Option<String> {
+    let oid = src.base_oid.as_deref()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&src.repo_root)
+        .args(["show", &format!("{oid}:{path}")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 /// Unified patch of everything that would go into a PR opened from here:
 /// merge-base(HEAD, base)..working-tree (two-dot, so committed + staged +
 /// unstaged), plus untracked files appended as added-file diffs.
 pub fn diff_patch(src: &LocalSource) -> Result<String> {
-    let base = if src.base_label == "HEAD" {
-        "HEAD".to_string()
-    } else {
-        git(&src.repo_root, &["merge-base", "HEAD", &src.base_label])?
-            .trim()
-            .to_string()
-    };
+    // The oid captured at resolve time; "HEAD" only in a zero-commit repo,
+    // where the committed-diff half is empty anyway.
+    let base = src.base_oid.clone().unwrap_or_else(|| "HEAD".to_string());
     let mut patch = git(
         &src.repo_root,
         &["diff", "-M", "--no-color", "--no-ext-diff", &base],
@@ -206,6 +236,61 @@ mod tests {
         assert_eq!(file.status, FileStatus::Modified);
         // Committed line + uncommitted line, both present.
         assert_eq!((file.additions, file.deletions), (2, 0));
+    }
+
+    #[test]
+    fn file_at_base_reads_committed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo(dir);
+        fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
+        run(dir, &["git", "add", "."]);
+        run(dir, &["git", "commit", "-m", "init"]);
+        fs::write(dir.join("a.rs"), "fn main() { changed(); }\n").unwrap();
+        fs::write(dir.join("new.txt"), "untracked\n").unwrap();
+
+        let src = resolve_local(dir).unwrap();
+        // HEAD base still captures a concrete oid.
+        assert_eq!(src.base_label, "HEAD");
+        assert!(src.base_oid.is_some());
+
+        // Old side = committed content, not the working tree.
+        assert_eq!(file_at_base(&src, "a.rs").as_deref(), Some("fn main() {}\n"));
+        // Untracked: absent at base. Binary: non-UTF-8 → None.
+        assert_eq!(file_at_base(&src, "new.txt"), None);
+        assert_eq!(file_at_base(&src, "blob.bin"), None);
+        assert_eq!(file_at_base(&src, "no/such/file.rs"), None);
+    }
+
+    #[test]
+    fn base_oid_is_merge_base_with_remote_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir(&upstream).unwrap();
+        init_repo(&upstream);
+        fs::write(upstream.join("lib.rs"), "pub fn one() {}\n").unwrap();
+        run(&upstream, &["git", "add", "."]);
+        run(&upstream, &["git", "commit", "-m", "init"]);
+
+        let clone = tmp.path().join("clone");
+        run(
+            tmp.path(),
+            &["git", "clone", upstream.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        run(&clone, &["git", "config", "user.email", "test@example.com"]);
+        run(&clone, &["git", "config", "user.name", "Test"]);
+        run(&clone, &["git", "config", "commit.gpgsign", "false"]);
+        run(&clone, &["git", "checkout", "-b", "feature"]);
+        fs::write(clone.join("lib.rs"), "pub fn one() {}\npub fn two() {}\n").unwrap();
+        run(&clone, &["git", "commit", "-am", "add two"]);
+
+        let src = resolve_local(&clone).unwrap();
+        assert_eq!(src.base_label, "origin/main");
+        let expected = git(&clone, &["merge-base", "HEAD", "origin/main"]).unwrap();
+        assert_eq!(src.base_oid.as_deref(), Some(expected.trim()));
+        // Old side comes from the merge-base commit, before the feature edit.
+        assert_eq!(file_at_base(&src, "lib.rs").as_deref(), Some("pub fn one() {}\n"));
     }
 
     #[test]

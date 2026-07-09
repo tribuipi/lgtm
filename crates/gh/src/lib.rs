@@ -1,6 +1,8 @@
 //! Fetch PR data via the `gh` CLI, piggybacking on the user's `gh auth`.
 
 use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -94,6 +96,10 @@ pub struct PrMeta {
     pub url: String,
     pub base_ref_name: String,
     pub head_ref_name: String,
+    #[serde(default)]
+    pub base_ref_oid: String,
+    #[serde(default)]
+    pub head_ref_oid: String,
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
@@ -112,7 +118,8 @@ pub fn fetch_meta(loc: &PrLocator) -> Result<PrMeta> {
         "--repo",
         &loc.repo_slug(),
         "--json",
-        "number,title,author,state,url,baseRefName,headRefName,additions,deletions,changedFiles",
+        "number,title,author,state,url,baseRefName,headRefName,baseRefOid,headRefOid,\
+         additions,deletions,changedFiles",
     ])?;
     serde_json::from_str(&json).context("unexpected gh pr view JSON")
 }
@@ -157,6 +164,107 @@ pub fn fetch_patch(loc: &PrLocator) -> Result<String> {
     ])
 }
 
+/// Blob-size cap: PR review never needs multi-megabyte files, and the raw
+/// contents API happily serves up to 100 MB.
+const MAX_BLOB_BYTES: usize = 1024 * 1024;
+
+/// Full contents of `path` at `commit_oid`, via the raw contents API.
+/// `Ok(None)` means "leave this file un-upgraded": absent on that side (404),
+/// non-UTF-8 (binary), or larger than [`MAX_BLOB_BYTES`]. A path at a commit
+/// is immutable, so results — including negative ones — are cached on disk in
+/// `~/.cache/review/blobs/` (sha256 of `repo\0oid\0path`, with an `.absent`
+/// sidecar marking negative entries).
+pub fn fetch_file_at(loc: &PrLocator, commit_oid: &str, path: &str) -> Result<Option<String>> {
+    let cache = cache_path(&loc.repo_slug(), commit_oid, path);
+    if let Some(cache) = &cache {
+        if cache.with_extension("absent").exists() {
+            return Ok(None);
+        }
+        if let Ok(bytes) = std::fs::read(cache) {
+            return Ok(String::from_utf8(bytes).ok());
+        }
+    }
+
+    let endpoint = format!(
+        "repos/{}/{}/contents/{}?ref={}",
+        loc.owner,
+        loc.repo,
+        encode_path(path),
+        commit_oid
+    );
+    let output = Command::new("gh")
+        .args(["api", "-H", "Accept: application/vnd.github.raw+json", &endpoint])
+        .output()
+        .map_err(|err| anyhow!("failed to run gh (is the GitHub CLI installed?): {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("404") {
+            mark_absent(cache);
+            return Ok(None);
+        }
+        bail!("gh api {endpoint} failed: {}", stderr.trim());
+    }
+    if output.stdout.len() > MAX_BLOB_BYTES {
+        mark_absent(cache);
+        return Ok(None);
+    }
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        mark_absent(cache);
+        return Ok(None);
+    };
+    if let Some(cache) = cache {
+        let _ = std::fs::write(cache, &text);
+    }
+    Ok(Some(text))
+}
+
+fn mark_absent(cache: Option<PathBuf>) {
+    if let Some(cache) = cache {
+        let _ = std::fs::write(cache.with_extension("absent"), b"");
+    }
+}
+
+/// `~/.cache/review/blobs/<key>`, creating the directory; None when HOME is
+/// unset or the directory can't be created (cache disabled, fetch still works).
+fn cache_path(repo: &str, oid: &str, path: &str) -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("HOME")?)
+        .join(".cache")
+        .join("review")
+        .join("blobs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(cache_key(repo, oid, path)))
+}
+
+/// Stable cache key: hex sha256 of `repo\0oid\0path`.
+pub fn cache_key(repo: &str, oid: &str, path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(repo.as_bytes());
+    hasher.update([0]);
+    hasher.update(oid.as_bytes());
+    hasher.update([0]);
+    hasher.update(path.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Percent-encode a repo path for the contents API, keeping `/` separators:
+/// every byte outside RFC 3986 unreserved is encoded, per segment.
+pub fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn gh(args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
         .args(args)
@@ -195,6 +303,50 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(resolve_pr_arg("not-a-pr").is_err());
+    }
+
+    #[test]
+    fn encodes_paths_per_segment_keeping_slashes() {
+        assert_eq!(encode_path("src/main.rs"), "src/main.rs");
+        assert_eq!(
+            encode_path("dir with space/naïve+file#1.rs"),
+            "dir%20with%20space/na%C3%AFve%2Bfile%231.rs"
+        );
+        assert_eq!(encode_path("a?b&c=d/e%f"), "a%3Fb%26c%3Dd/e%25f");
+        assert_eq!(encode_path("A-Z_a.z~0/9"), "A-Z_a.z~0/9");
+    }
+
+    #[test]
+    fn cache_key_is_stable() {
+        // Pinned: changing this constant silently invalidates every user's
+        // on-disk cache. The components are NUL-separated so `("a/b", "c")`
+        // and `("a", "b/c")` can't collide.
+        assert_eq!(
+            cache_key(
+                "BurntSushi/ripgrep",
+                "f16ea0a8cfd0fbb0328b8348972356d532b921d0",
+                "crates/core/main.rs"
+            ),
+            "1b21e76f45d6d948cf7b44c696608c64bdaeee714ac61b21dce21750ad9cb6bc"
+        );
+        assert_ne!(
+            cache_key("o/r", "oid", "a/b"),
+            cache_key("o/r/a", "oid", "b")
+        );
+    }
+
+    #[test]
+    fn deserializes_pr_meta_with_oids() {
+        let json = r#"{
+            "number": 1, "title": "t", "author": {"login": "a"}, "state": "OPEN",
+            "url": "https://github.com/o/r/pull/1",
+            "baseRefName": "main", "headRefName": "feat",
+            "baseRefOid": "abc123", "headRefOid": "def456",
+            "additions": 1, "deletions": 2, "changedFiles": 3
+        }"#;
+        let meta: PrMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.base_ref_oid, "abc123");
+        assert_eq!(meta.head_ref_oid, "def456");
     }
 
     #[test]

@@ -1,15 +1,16 @@
 mod theme;
 
 use anyhow::anyhow;
-use diff_core::{DiffRow, FileStatus, PrDiff};
+use diff_core::{diff_texts, DiffRow, FileStatus, Hunk, PrDiff};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use gpui::{
-    actions, div, font, prelude::*, px, size, uniform_list, App, Application, Bounds,
+    actions, div, font, point, prelude::*, px, size, uniform_list, App, Application, Bounds,
     ClipboardItem, Context, FocusHandle, HighlightStyle, Hsla, KeyBinding, Keystroke,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, Pixels, Point, ScrollStrategy, SharedString, StyledText, Subscription,
     TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
 };
+use std::collections::{HashMap, HashSet};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     input::{Escape as InputEscape, Input, InputEvent, InputState},
@@ -161,8 +162,19 @@ enum Row {
     },
     HunkHeader {
         label: SharedString,
+        /// True once the file's hunks come from the Phase-2 full-content
+        /// re-diff (renders the label in a subtly different color).
+        upgraded: bool,
     },
     Binary,
+    /// Hidden shared lines in an upgraded file: before the first hunk, between
+    /// hunks, or after the last one. Clicking expands the whole gap.
+    /// Selectable-through like headers (`row_side_text` returns None).
+    Gap {
+        file_ix: usize,
+        gap_ix: usize,
+        hidden: u32,
+    },
     Line {
         old_no: Option<u32>,
         new_no: Option<u32>,
@@ -341,15 +353,139 @@ fn hunk_syntax(
         .collect()
 }
 
+/// Phase-2 result for one file: full new-side lines and whole-file syntax
+/// span tables (per line, both sides), plus which gaps the user has expanded.
+/// The authoritative re-diffed hunks live in `diff.files[ix].hunks` — this is
+/// the extra state needed to render spans and expand context. Lives in
+/// `ItemData.upgrades`, so a view-mode toggle preserves expansion and a
+/// refresh (which rebuilds ItemData contents) resets it.
+struct FileUpgrade {
+    /// The complete new-side file, line-ending-normalized, split into lines.
+    new_lines: Vec<SharedString>,
+    old_spans: Vec<Vec<(Range<usize>, syntax::Token)>>,
+    new_spans: Vec<Vec<(Range<usize>, syntax::Token)>>,
+    /// Expanded gap indices (0 = before the first hunk, i+1 = after hunk i).
+    expanded: HashSet<usize>,
+}
+
+impl FileUpgrade {
+    /// Whole-file syntax spans for a hunk row, by its side's line number.
+    fn row_spans(&self, row: &DiffRow) -> Vec<(Range<usize>, syntax::Token)> {
+        let (table, no, text) = match row {
+            DiffRow::Context { new_no, text, .. } | DiffRow::Added { new_no, text, .. } => {
+                (&self.new_spans, *new_no, text)
+            }
+            DiffRow::Removed { old_no, text, .. } => (&self.old_spans, *old_no, text),
+        };
+        if text.len() > MAX_SYNTAX_LINE_BYTES {
+            return Vec::new();
+        }
+        table.get(no as usize - 1).cloned().unwrap_or_default()
+    }
+}
+
+/// The hidden shared lines in gap `gap_ix` (0..=hunks.len()) of an upgraded
+/// file: (first old line, first new line, line count), 1-based. Context lines
+/// are shared, so the count is the same on both sides and old numbers stay a
+/// constant offset from new ones across the gap. Handles git's zero-count
+/// convention (a zero-count side's start is the line *before* the hunk).
+fn gap_span(hunks: &[Hunk], gap_ix: usize, total_new: u32) -> (u32, u32, u32) {
+    let (old_lo, new_lo) = if gap_ix == 0 {
+        (1, 1)
+    } else {
+        let h = &hunks[gap_ix - 1];
+        let pre_old = if h.old_count == 0 { h.old_start } else { h.old_start - 1 };
+        let pre_new = if h.new_count == 0 { h.new_start } else { h.new_start - 1 };
+        (pre_old + h.old_count + 1, pre_new + h.new_count + 1)
+    };
+    let new_hi = if gap_ix == hunks.len() {
+        total_new
+    } else {
+        let h = &hunks[gap_ix];
+        if h.new_count == 0 { h.new_start } else { h.new_start - 1 }
+    };
+    (old_lo, new_lo, (new_hi + 1).saturating_sub(new_lo))
+}
+
+/// Emit gap `gap_ix` of an upgraded file into `rows`: nothing when no lines
+/// are hidden there, synthesized full-context rows when expanded, otherwise
+/// one clickable Gap row.
+fn push_gap_rows(
+    rows: &mut Vec<Row>,
+    upgrade: &FileUpgrade,
+    hunks: &[Hunk],
+    file_ix: usize,
+    gap_ix: usize,
+    mode: ViewMode,
+) {
+    let (old_lo, new_lo, count) = gap_span(hunks, gap_ix, upgrade.new_lines.len() as u32);
+    if count == 0 {
+        return;
+    }
+    if !upgrade.expanded.contains(&gap_ix) {
+        rows.push(Row::Gap {
+            file_ix,
+            gap_ix,
+            hidden: count,
+        });
+        return;
+    }
+    for j in 0..count {
+        let (old_no, new_no) = (old_lo + j, new_lo + j);
+        let text = upgrade.new_lines[(new_no - 1) as usize].clone();
+        let syntax = if text.len() > MAX_SYNTAX_LINE_BYTES {
+            Vec::new()
+        } else {
+            upgrade
+                .new_spans
+                .get((new_no - 1) as usize)
+                .cloned()
+                .unwrap_or_default()
+        };
+        rows.push(match mode {
+            ViewMode::Unified => Row::Line {
+                old_no: Some(old_no),
+                new_no: Some(new_no),
+                kind: LineKind::Context,
+                text,
+                intra: Vec::new(),
+                syntax,
+            },
+            ViewMode::Split => Row::SplitLine {
+                left: Some(Cell {
+                    no: old_no,
+                    kind: LineKind::Context,
+                    text: text.clone(),
+                    intra: Vec::new(),
+                    syntax: syntax.clone(),
+                }),
+                right: Some(Cell {
+                    no: new_no,
+                    kind: LineKind::Context,
+                    text,
+                    intra: Vec::new(),
+                    syntax,
+                }),
+            },
+        });
+    }
+}
+
 /// Flatten the diff into display rows plus the row indices of file headers and
 /// hunk headers. Split mode pairs removed/added runs positionally into
-/// two-cell rows; unequal runs leave one-sided rows.
-fn build_rows(diff: &PrDiff, mode: ViewMode) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
+/// two-cell rows; unequal runs leave one-sided rows. Files present in
+/// `upgrades` use whole-file syntax spans and get gap rows between hunks.
+fn build_rows(
+    diff: &PrDiff,
+    mode: ViewMode,
+    upgrades: &HashMap<usize, FileUpgrade>,
+) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut file_rows = Vec::new();
     let mut hunk_rows = Vec::new();
 
-    for file in &diff.files {
+    for (file_ix, file) in diff.files.iter().enumerate() {
+        let upgrade = upgrades.get(&file_ix);
         if !rows.is_empty() {
             rows.push(Row::Spacer);
         }
@@ -369,8 +505,14 @@ fn build_rows(diff: &PrDiff, mode: ViewMode) -> (Vec<Row>, Vec<usize>, Vec<usize
             continue;
         }
         let lang = syntax::language_for_path(file.display_path());
-        for hunk in &file.hunks {
-            let syntax_spans = hunk_syntax(lang, &hunk.rows);
+        for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+            if let Some(upgrade) = upgrade {
+                push_gap_rows(&mut rows, upgrade, &file.hunks, file_ix, hunk_ix, mode);
+            }
+            let syntax_spans = match upgrade {
+                Some(upgrade) => hunk.rows.iter().map(|row| upgrade.row_spans(row)).collect(),
+                None => hunk_syntax(lang, &hunk.rows),
+            };
             hunk_rows.push(rows.len());
             let mut label = format!(
                 "@@ -{},{} +{},{} @@",
@@ -382,6 +524,7 @@ fn build_rows(diff: &PrDiff, mode: ViewMode) -> (Vec<Row>, Vec<usize>, Vec<usize
             }
             rows.push(Row::HunkHeader {
                 label: label.into(),
+                upgraded: upgrade.is_some(),
             });
             match mode {
                 ViewMode::Unified => {
@@ -533,6 +676,9 @@ fn build_rows(diff: &PrDiff, mode: ViewMode) -> (Vec<Row>, Vec<usize>, Vec<usize
                 }
             }
         }
+        if let Some(upgrade) = upgrade {
+            push_gap_rows(&mut rows, upgrade, &file.hunks, file_ix, file.hunks.len(), mode);
+        }
     }
 
     (rows, file_rows, hunk_rows)
@@ -644,10 +790,40 @@ fn line_content(
 /// `selection` is this row's selected byte range (side + non-empty range),
 /// computed by the caller via `row_selection_range`; its side always matches
 /// the row shape (Unified for Line rows, Left/Right for SplitLine rows).
-fn render_row(row: &Row, selection: Option<(SelSide, Range<usize>)>) -> gpui::AnyElement {
+/// `entity` is only used by Gap rows, whose click expands the gap.
+fn render_row(
+    row: &Row,
+    selection: Option<(SelSide, Range<usize>)>,
+    entity: &gpui::Entity<ReviewApp>,
+) -> gpui::AnyElement {
     let row_height = px(ROW_HEIGHT);
     match row {
         Row::Spacer => div().h(row_height).into_any_element(),
+        Row::Gap {
+            file_ix,
+            gap_ix,
+            hidden,
+        } => {
+            let (file_ix, gap_ix) = (*file_ix, *gap_ix);
+            let entity = entity.clone();
+            let noun = if *hidden == 1 { "line" } else { "lines" };
+            div()
+                .id(("gap", (file_ix << 20) | gap_ix))
+                .h(row_height)
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme::crust())
+                .hover(|style| style.bg(theme::surface0()))
+                .cursor_pointer()
+                .text_color(theme::overlay0())
+                .child(SharedString::from(format!("⋯ {hidden} hidden {noun}")))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.expand_gap(file_ix, gap_ix, cx));
+                })
+                .into_any_element()
+        }
         Row::FileHeader {
             path,
             old_path,
@@ -703,14 +879,20 @@ fn render_row(row: &Row, selection: Option<(SelSide, Range<usize>)>) -> gpui::An
                 )
                 .into_any_element()
         }
-        Row::HunkHeader { label } => div()
+        Row::HunkHeader { label, upgraded } => div()
             .h(row_height)
             .w_full()
             .flex()
             .items_center()
             .px_3()
             .bg(theme::crust())
-            .text_color(theme::overlay0())
+            // Subtle upgrade indicator: full-content re-diffed hunks get a
+            // faint blue label instead of the plain overlay color.
+            .text_color(if *upgraded {
+                Hsla::from(theme::blue()).opacity(0.55)
+            } else {
+                theme::overlay0().into()
+            })
             .child(label.clone())
             .into_any_element(),
         Row::Binary => div()
@@ -869,6 +1051,10 @@ struct ItemData {
     /// switching); cleared on view-mode toggle and refresh, where row indices
     /// change meaning.
     selection: Option<Selection>,
+    /// Phase-2 upgrades by file index into `diff.files`: whole-file span
+    /// tables, full new-side lines, and expanded gaps. The re-diffed hunks
+    /// themselves replace `diff.files[ix].hunks`. Reset on refresh.
+    upgrades: HashMap<usize, FileUpgrade>,
 }
 
 struct ReviewItem {
@@ -878,6 +1064,9 @@ struct ReviewItem {
     /// A refresh is in flight while the old data stays visible.
     reloading: bool,
     refresh_error: Option<SharedString>,
+    /// Bumped whenever fresh data is installed; an in-flight Phase-2 upgrade
+    /// only lands if the generation it captured is still current.
+    upgrade_gen: u64,
 }
 
 impl ReviewItem {
@@ -947,9 +1136,12 @@ impl ReviewItem {
         self.refresh_error = None;
         match &mut self.state {
             ItemState::Ready(data) => {
+                // Fresh patch-derived data: any previous upgrade (and its
+                // expanded gaps) is stale — the upgrade re-runs from scratch.
+                data.upgrades.clear();
                 if data.mode != mode {
                     // The user toggled unified/split while the refresh ran.
-                    (rows, file_rows, hunk_rows) = build_rows(&diff, data.mode);
+                    (rows, file_rows, hunk_rows) = build_rows(&diff, data.mode, &data.upgrades);
                 }
                 if pr_meta.is_some() {
                     data.pr_meta = pr_meta;
@@ -976,6 +1168,7 @@ impl ReviewItem {
                     additions,
                     deletions,
                     selection: None,
+                    upgrades: HashMap::new(),
                 }));
             }
         }
@@ -1022,7 +1215,7 @@ fn fetch_item(source: &Source, mode: ViewMode) -> anyhow::Result<Loaded> {
         }
     };
     let diff = diff_core::parse_patch(&patch);
-    let (rows, file_rows, hunk_rows) = build_rows(&diff, mode);
+    let (rows, file_rows, hunk_rows) = build_rows(&diff, mode, &HashMap::new());
     Ok(Loaded {
         meta,
         diff,
@@ -1030,6 +1223,159 @@ fn fetch_item(source: &Source, mode: ViewMode) -> anyhow::Result<Loaded> {
         file_rows,
         hunk_rows,
         mode,
+    })
+}
+
+// --- Phase-2 full-content upgrade ---------------------------------------
+
+/// Never upgrade more than this many files per item; the rest stay on the
+/// perfectly serviceable patch-derived view.
+const MAX_UPGRADE_FILES: usize = 400;
+/// Per-side blob cap; gh::fetch_file_at enforces the same limit for PRs.
+const MAX_UPGRADE_BLOB_BYTES: usize = 1024 * 1024;
+/// gh/git are one subprocess per call, so a small worker pool is plenty.
+const UPGRADE_WORKERS: usize = 4;
+
+/// Where to fetch full file contents from, snapshotted when an item loads.
+enum UpgradeSource {
+    Pr {
+        loc: gh::PrLocator,
+        base_oid: String,
+        head_oid: String,
+    },
+    Local(git::LocalSource),
+}
+
+/// One file's fetch inputs, snapshotted from the parsed patch (paths and
+/// statuses are already known — no extra API call needed).
+struct UpgradeJob {
+    file_ix: usize,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    status: FileStatus,
+}
+
+/// One file's completed upgrade: authoritative hunks plus the render state.
+struct UpgradedFile {
+    file_ix: usize,
+    hunks: Vec<Hunk>,
+    additions: u32,
+    deletions: u32,
+    upgrade: FileUpgrade,
+}
+
+/// Blocking fetch + re-diff + whole-file highlight for every eligible file;
+/// runs on the background executor. Files that fail on either side are simply
+/// missing from the result and keep their patch-derived view.
+fn run_upgrade(source: &UpgradeSource, mut jobs: Vec<UpgradeJob>) -> Vec<UpgradedFile> {
+    if jobs.len() > MAX_UPGRADE_FILES {
+        eprintln!(
+            "review: {} changed files; upgrading the first {MAX_UPGRADE_FILES} to full \
+             contents, the rest stay patch-derived",
+            jobs.len()
+        );
+        jobs.truncate(MAX_UPGRADE_FILES);
+    }
+    let queue = std::sync::Mutex::new(jobs.into_iter());
+    let done = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..UPGRADE_WORKERS {
+            scope.spawn(|| loop {
+                let Some(job) = queue.lock().unwrap().next() else {
+                    break;
+                };
+                if let Some(result) = upgrade_file(source, &job) {
+                    done.lock().unwrap().push(result);
+                }
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+    done.sort_by_key(|file| file.file_ix);
+    done
+}
+
+/// One side's full contents, or None to leave the file un-upgraded: absent,
+/// binary/non-UTF-8, over the size cap, or a fetch failure.
+fn fetch_side(source: &UpgradeSource, path: &str, old: bool) -> Option<String> {
+    let text = match source {
+        UpgradeSource::Pr { loc, base_oid, head_oid } => {
+            let oid = if old { base_oid } else { head_oid };
+            match gh::fetch_file_at(loc, oid, path) {
+                Ok(text) => text?,
+                Err(err) => {
+                    eprintln!("review: {path}: {err:#}");
+                    return None;
+                }
+            }
+        }
+        UpgradeSource::Local(src) => {
+            if old {
+                git::file_at_base(src, path)?
+            } else {
+                String::from_utf8(std::fs::read(src.repo_root.join(path)).ok()?).ok()?
+            }
+        }
+    };
+    (text.len() <= MAX_UPGRADE_BLOB_BYTES).then_some(text)
+}
+
+fn upgrade_file(source: &UpgradeSource, job: &UpgradeJob) -> Option<UpgradedFile> {
+    // Presence must match the patch's story: Added has no old side, Deleted no
+    // new side, everything else needs both. A wanted-but-missing side (404,
+    // binary, huge) keeps the whole file patch-derived.
+    let old_text = match (job.status, &job.old_path) {
+        (FileStatus::Added, _) => String::new(),
+        (_, Some(path)) => fetch_side(source, path, true)?,
+        (_, None) => return None,
+    };
+    let new_text = match (job.status, &job.new_path) {
+        (FileStatus::Deleted, _) => String::new(),
+        (_, Some(path)) => fetch_side(source, path, false)?,
+        (_, None) => return None,
+    };
+    // Normalize CRLF→LF up front: hunks, span tables, and gap rows must all
+    // index the same line/byte space (diff_texts itself is ending-agnostic).
+    let normalize = |text: String| {
+        if text.contains('\r') {
+            text.replace("\r\n", "\n")
+        } else {
+            text
+        }
+    };
+    let old_text = normalize(old_text);
+    let new_text = normalize(new_text);
+
+    let hunks = diff_texts(&old_text, &new_text, 3);
+    let (additions, deletions) = hunks
+        .iter()
+        .flat_map(|hunk| &hunk.rows)
+        .fold((0, 0), |(a, d), row| match row {
+            DiffRow::Added { .. } => (a + 1, d),
+            DiffRow::Removed { .. } => (a, d + 1),
+            DiffRow::Context { .. } => (a, d),
+        });
+
+    let path = job.new_path.as_deref().or(job.old_path.as_deref())?;
+    let lang = syntax::language_for_path(path);
+    let spans = |text: &str| match lang {
+        Some(lang) if !text.is_empty() => syntax::highlight_lines(lang, text),
+        _ => Vec::new(),
+    };
+    Some(UpgradedFile {
+        file_ix: job.file_ix,
+        hunks,
+        additions,
+        deletions,
+        upgrade: FileUpgrade {
+            old_spans: spans(&old_text),
+            new_spans: spans(&new_text),
+            new_lines: new_text
+                .lines()
+                .map(|line| SharedString::from(line.to_string()))
+                .collect(),
+            expanded: HashSet::new(),
+        },
     })
 }
 
@@ -1493,6 +1839,7 @@ impl ReviewApp {
             state: ItemState::Loading,
             reloading: false,
             refresh_error: None,
+            upgrade_gen: 0,
         });
         self.active = self.items.len() - 1;
         Self::spawn_fetch(id, source, ViewMode::Split, cx);
@@ -1510,7 +1857,50 @@ impl ReviewApp {
                 };
                 item.reloading = false;
                 match fetched {
-                    Ok(loaded) => item.install(loaded),
+                    Ok(loaded) => {
+                        item.install(loaded);
+                        // Phase 2: after the instant patch-derived paint,
+                        // upgrade every eligible file to full contents in the
+                        // background. The bumped generation cancels any
+                        // still-running upgrade from before a refresh.
+                        item.upgrade_gen += 1;
+                        let gen = item.upgrade_gen;
+                        if let ItemState::Ready(data) = &item.state {
+                            let jobs: Vec<UpgradeJob> = data
+                                .diff
+                                .files
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, f)| {
+                                    f.status != FileStatus::Binary && !f.hunks.is_empty()
+                                })
+                                .map(|(ix, f)| UpgradeJob {
+                                    file_ix: ix,
+                                    old_path: f.old_path.clone(),
+                                    new_path: f.new_path.clone(),
+                                    status: f.status,
+                                })
+                                .collect();
+                            let source = match &item.source {
+                                Source::Pr(loc) => data
+                                    .pr_meta
+                                    .as_ref()
+                                    .filter(|meta| {
+                                        !meta.base_ref_oid.is_empty()
+                                            && !meta.head_ref_oid.is_empty()
+                                    })
+                                    .map(|meta| UpgradeSource::Pr {
+                                        loc: loc.clone(),
+                                        base_oid: meta.base_ref_oid.clone(),
+                                        head_oid: meta.head_ref_oid.clone(),
+                                    }),
+                                Source::Local(src) => Some(UpgradeSource::Local(src.clone())),
+                            };
+                            if let (Some(source), false) = (source, jobs.is_empty()) {
+                                Self::spawn_upgrade(id, gen, source, jobs, cx);
+                            }
+                        }
+                    }
                     Err(err) => {
                         let msg = format!("{err:#}");
                         match &item.state {
@@ -1525,6 +1915,107 @@ impl ReviewApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Phase 2, per item: fetch every file's full contents, re-diff, and
+    /// re-highlight in the background, then rebuild rows once and swap
+    /// atomically. Scroll keeps its pixel offset (the re-diff normally
+    /// reproduces the patch's hunks, so drift is small); the selection is
+    /// cleared because row indices shift.
+    fn spawn_upgrade(
+        id: u64,
+        gen: u64,
+        source: UpgradeSource,
+        jobs: Vec<UpgradeJob>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let upgraded = cx
+                .background_spawn(async move { run_upgrade(&source, jobs) })
+                .await;
+            if upgraded.is_empty() {
+                return;
+            }
+            this.update(cx, |app, cx| {
+                let Some(item) = app.items.iter_mut().find(|item| item.id == id) else {
+                    return;
+                };
+                if item.upgrade_gen != gen {
+                    return;
+                }
+                let ItemState::Ready(data) = &mut item.state else {
+                    return;
+                };
+                for file in upgraded {
+                    let Some(target) = data.diff.files.get_mut(file.file_ix) else {
+                        continue;
+                    };
+                    target.hunks = file.hunks;
+                    target.additions = file.additions;
+                    target.deletions = file.deletions;
+                    data.upgrades.insert(file.file_ix, file.upgrade);
+                }
+                (data.additions, data.deletions) = data
+                    .diff
+                    .files
+                    .iter()
+                    .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
+                let (rows, file_rows, hunk_rows) =
+                    build_rows(&data.diff, data.mode, &data.upgrades);
+                data.rows = rows;
+                data.file_rows = file_rows;
+                data.hunk_rows = hunk_rows;
+                data.cursor = data.cursor.min(data.rows.len().saturating_sub(1));
+                data.selection = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reveal all hidden lines of one gap in an upgraded file, keeping the
+    /// viewport stable: when the expansion happens above the visible top row,
+    /// the scroll offset shifts down by exactly the inserted height.
+    fn expand_gap(&mut self, file_ix: usize, gap_ix: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.active_data_mut() else {
+            return;
+        };
+        let Some(upgrade) = data.upgrades.get_mut(&file_ix) else {
+            return;
+        };
+        if !upgrade.expanded.insert(gap_ix) {
+            return;
+        }
+        let gap_row = data.rows.iter().position(|row| {
+            matches!(row, Row::Gap { file_ix: f, gap_ix: g, .. } if *f == file_ix && *g == gap_ix)
+        });
+        // The gap row itself is replaced by `hidden` context rows.
+        let inserted = match gap_row.map(|ix| &data.rows[ix]) {
+            Some(Row::Gap { hidden, .. }) => *hidden as usize - 1,
+            _ => 0,
+        };
+        let (rows, file_rows, hunk_rows) = build_rows(&data.diff, data.mode, &data.upgrades);
+        data.rows = rows;
+        data.file_rows = file_rows;
+        data.hunk_rows = hunk_rows;
+        data.selection = None;
+        if let Some(gap_row) = gap_row {
+            if data.cursor > gap_row {
+                data.cursor += inserted;
+            }
+            let scroll = data.scroll.0.borrow();
+            let offset = scroll.base_handle.offset();
+            // offset.y is negative when scrolled down.
+            let top_row = (f32::from(-offset.y) / ROW_HEIGHT).floor() as usize;
+            if gap_row < top_row {
+                scroll.base_handle.set_offset(point(
+                    offset.x,
+                    offset.y - px(inserted as f32 * ROW_HEIGHT),
+                ));
+            }
+        }
+        cx.notify();
     }
 
     fn submit_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1786,6 +2277,7 @@ impl ReviewApp {
                 let source = Source::Local(git::LocalSource {
                     branch: dir_name(&path),
                     base_label: "…".to_string(),
+                    base_oid: None,
                     repo_root: path,
                 });
                 app.open_item(source, cx);
@@ -1854,7 +2346,7 @@ impl ReviewApp {
             ViewMode::Unified => ViewMode::Split,
             ViewMode::Split => ViewMode::Unified,
         };
-        let (rows, file_rows, hunk_rows) = build_rows(&data.diff, data.mode);
+        let (rows, file_rows, hunk_rows) = build_rows(&data.diff, data.mode, &data.upgrades);
         data.rows = rows;
         data.file_rows = file_rows;
         data.hunk_rows = hunk_rows;
@@ -2381,7 +2873,7 @@ impl Render for ReviewApp {
                                                     .filter(|range| !range.is_empty())
                                                     .map(|range| (sel.side, range))
                                             });
-                                            render_row(row, row_sel)
+                                            render_row(row, row_sel, &entity)
                                         })
                                         .collect()
                                 }
@@ -2606,7 +3098,7 @@ mod tests {
 
     #[test]
     fn split_context_fills_both_cells() {
-        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split);
+        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new());
         // rows[0] = FileHeader, rows[1] = HunkHeader, rows[2] = first context.
         match &rows[2] {
             Row::SplitLine { left, right } => {
@@ -2619,7 +3111,7 @@ mod tests {
 
     #[test]
     fn split_pairs_equal_runs_positionally() {
-        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split);
+        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new());
         match &rows[3] {
             Row::SplitLine { left, right } => {
                 assert_eq!(cell(left), (2, LineKind::Removed, "old1", &[0..3][..]));
@@ -2646,7 +3138,7 @@ mod tests {
 
     #[test]
     fn split_unequal_and_lone_runs_are_one_sided() {
-        let (rows, _, hunk_rows) = build_rows(&sample_diff(), ViewMode::Split);
+        let (rows, _, hunk_rows) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new());
         let h2 = hunk_rows[1];
         // 2 removed / 1 added: first row paired, second left-only.
         match &rows[h2 + 1] {
@@ -2670,6 +3162,139 @@ mod tests {
                 assert_eq!(cell(right), (12, LineKind::Added, "lone", &[][..]));
             }
             _ => panic!("expected split line"),
+        }
+    }
+
+    /// A 20-line file with line 10 changed, re-diffed with context 3: one
+    /// hunk covering lines 7..=13, hidden gaps of 6 lines above and 7 below.
+    fn upgraded_diff() -> (PrDiff, HashMap<usize, FileUpgrade>) {
+        let old: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        let new = old.replace("line 10\n", "line ten\n");
+        let hunks = diff_texts(&old, &new, 3);
+        let new_lines: Vec<SharedString> = new.lines().map(|l| l.to_string().into()).collect();
+        let n = new_lines.len();
+        let file = FileDiff {
+            old_path: Some("a.txt".into()),
+            new_path: Some("a.txt".into()),
+            status: FileStatus::Modified,
+            hunks,
+            additions: 1,
+            deletions: 1,
+        };
+        let upgrade = FileUpgrade {
+            new_lines,
+            old_spans: vec![Vec::new(); 20],
+            new_spans: vec![Vec::new(); n],
+            expanded: HashSet::new(),
+        };
+        (PrDiff { files: vec![file] }, HashMap::from([(0, upgrade)]))
+    }
+
+    #[test]
+    fn gap_span_math() {
+        let (diff, upgrades) = upgraded_diff();
+        let hunks = &diff.files[0].hunks;
+        let total = upgrades[&0].new_lines.len() as u32;
+        assert_eq!(gap_span(hunks, 0, total), (1, 1, 6)); // lines 1..=6 hidden
+        assert_eq!(gap_span(hunks, 1, total), (14, 14, 7)); // lines 14..=20
+
+        // Zero hunks (e.g. a pure CRLF flip): the whole file is one gap.
+        assert_eq!(gap_span(&[], 0, total), (1, 1, 20));
+        // Added file: single hunk covers everything, both gaps empty.
+        let added = diff_texts("", "a\nb\n", 3);
+        assert_eq!(gap_span(&added, 0, 2).2, 0);
+        assert_eq!(gap_span(&added, 1, 2).2, 0);
+        // Deleted file: new side empty, no gaps and no underflow.
+        let deleted = diff_texts("a\nb\n", "", 3);
+        assert_eq!(gap_span(&deleted, 0, 0).2, 0);
+        assert_eq!(gap_span(&deleted, 1, 0).2, 0);
+    }
+
+    fn row_name(row: &Row) -> &'static str {
+        match row {
+            Row::Spacer => "Spacer",
+            Row::FileHeader { .. } => "FileHeader",
+            Row::HunkHeader { .. } => "HunkHeader",
+            Row::Binary => "Binary",
+            Row::Gap { .. } => "Gap",
+            Row::Line { .. } => "Line",
+            Row::SplitLine { .. } => "SplitLine",
+        }
+    }
+
+    #[test]
+    fn upgraded_file_gets_gap_rows_and_marked_headers() {
+        let (diff, upgrades) = upgraded_diff();
+        for mode in [ViewMode::Unified, ViewMode::Split] {
+            let (rows, _, hunk_rows) = build_rows(&diff, mode, &upgrades);
+            // FileHeader, Gap(6), HunkHeader, 7 hunk rows, Gap(7).
+            match &rows[1] {
+                Row::Gap { file_ix, gap_ix, hidden } => {
+                    assert_eq!((*file_ix, *gap_ix, *hidden), (0, 0, 6));
+                }
+                other => panic!("expected leading gap, got {}", row_name(other)),
+            }
+            assert_eq!(hunk_rows, vec![2]);
+            assert!(matches!(rows[2], Row::HunkHeader { upgraded: true, .. }));
+            match rows.last().unwrap() {
+                Row::Gap { gap_ix, hidden, .. } => assert_eq!((*gap_ix, *hidden), (1, 7)),
+                other => panic!("expected trailing gap, got {}", row_name(other)),
+            }
+            // Gap rows are selectable-through, like headers.
+            assert!(row_side_text(&rows[1], SelSide::Unified).is_none());
+            assert!(row_side_text(&rows[1], SelSide::Left).is_none());
+        }
+        // Un-upgraded build of the same diff has no gap rows.
+        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new());
+        assert!(!rows.iter().any(|row| matches!(row, Row::Gap { .. })));
+        assert!(matches!(rows[1], Row::HunkHeader { upgraded: false, .. }));
+    }
+
+    #[test]
+    fn expanded_gap_synthesizes_context_rows_with_correct_numbers() {
+        let (diff, mut upgrades) = upgraded_diff();
+        upgrades.get_mut(&0).unwrap().expanded.insert(0);
+
+        let (rows, _, hunk_rows) = build_rows(&diff, ViewMode::Unified, &upgrades);
+        // Leading gap expanded into 6 context rows before the hunk header.
+        assert_eq!(hunk_rows, vec![7]); // FileHeader + 6 context rows
+        for (j, row) in rows[1..7].iter().enumerate() {
+            match row {
+                Row::Line { old_no, new_no, kind, text, .. } => {
+                    assert_eq!(*kind, LineKind::Context);
+                    assert_eq!(*old_no, Some(j as u32 + 1));
+                    assert_eq!(*new_no, Some(j as u32 + 1));
+                    assert_eq!(text.as_ref(), format!("line {}", j + 1));
+                }
+                other => panic!("expected context line, got {}", row_name(other)),
+            }
+        }
+        // Trailing gap still collapsed.
+        assert!(matches!(rows.last(), Some(Row::Gap { gap_ix: 1, .. })));
+
+        // Split mode: same expansion as two-cell context rows.
+        let (rows, _, _) = build_rows(&diff, ViewMode::Split, &upgrades);
+        match &rows[1] {
+            Row::SplitLine { left, right } => {
+                let (l, r) = (left.as_ref().unwrap(), right.as_ref().unwrap());
+                assert_eq!((l.no, r.no), (1, 1));
+                assert_eq!(l.kind, LineKind::Context);
+                assert_eq!(l.text.as_ref(), "line 1");
+                assert_eq!(r.text.as_ref(), "line 1");
+            }
+            other => panic!("expected split context, got {}", row_name(other)),
+        }
+
+        // Expanding the trailing gap too: numbering continues past the hunk.
+        upgrades.get_mut(&0).unwrap().expanded.insert(1);
+        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &upgrades);
+        assert!(!rows.iter().any(|row| matches!(row, Row::Gap { .. })));
+        match rows.last().unwrap() {
+            Row::Line { old_no, new_no, text, .. } => {
+                assert_eq!((*old_no, *new_no), (Some(20), Some(20)));
+                assert_eq!(text.as_ref(), "line 20");
+            }
+            other => panic!("expected context line, got {}", row_name(other)),
         }
     }
 
@@ -2849,7 +3474,7 @@ mod tests {
     fn header_indices_are_correct_in_both_modes() {
         let diff = sample_diff();
         for mode in [ViewMode::Unified, ViewMode::Split] {
-            let (rows, file_rows, hunk_rows) = build_rows(&diff, mode);
+            let (rows, file_rows, hunk_rows) = build_rows(&diff, mode, &HashMap::new());
             assert_eq!(file_rows.len(), 2);
             assert_eq!(hunk_rows.len(), 2);
             for &ix in &file_rows {
@@ -2862,8 +3487,8 @@ mod tests {
             assert!(matches!(rows[file_rows[1] + 1], Row::Binary));
         }
         // Unified emits one row per diff row; split collapses the equal run.
-        let (unified, _, _) = build_rows(&diff, ViewMode::Unified);
-        let (split, _, _) = build_rows(&diff, ViewMode::Split);
+        let (unified, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new());
+        let (split, _, _) = build_rows(&diff, ViewMode::Split, &HashMap::new());
         let unified_lines = unified.iter().filter(|r| matches!(r, Row::Line { .. })).count();
         let split_lines = split
             .iter()
@@ -2943,7 +3568,7 @@ mod tests {
 
     #[test]
     fn row_range_skips_non_text_rows() {
-        let header = Row::HunkHeader { label: "@@".into() };
+        let header = Row::HunkHeader { label: "@@".into(), upgraded: false };
         let sel = sel(SelSide::Unified, (0, 0), (2, 3));
         // Headers/spacers inside the span contribute nothing…
         assert_eq!(row_selection_range(&sel, 1, &header), None);
@@ -2982,7 +3607,7 @@ mod tests {
     fn copy_assembles_contributing_rows() {
         let rows = vec![
             line("fn main() {"),
-            Row::HunkHeader { label: "@@".into() },
+            Row::HunkHeader { label: "@@".into(), upgraded: false },
             line(""),
             line("    body();"),
             line("}"),
