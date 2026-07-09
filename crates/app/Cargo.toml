@@ -1,0 +1,14 @@
+[package]
+name = "review"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "review"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+diff-core = { path = "../diff-core" }
+gh = { path = "../gh" }
+gpui = "0.2"
