@@ -33,6 +33,7 @@ cargo run --release
 - local repo diffs
 - minimap,
 - inline GitHub review comments (reading + posting, hover a line for +)
+- submitting reviews (approve / request changes / comment, `cmd-enter` or the Review button)
 
 Coming: LSP, AI inline review annotations
 
@@ -51,6 +52,7 @@ Coming: LSP, AI inline review annotations
 | `c` | toggle inline comments |
 | `cmd-j` | chat with Claude Code |
 | `r` | refresh active item |
+| `cmd-enter` | submit review (approve / request changes / comment) |
 | `home` / `end` | top / bottom |
 | `cmd-c` | copy selection |
 | `cmd-q` | quit |

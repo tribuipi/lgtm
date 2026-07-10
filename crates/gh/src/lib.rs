@@ -107,6 +107,10 @@ pub struct PrMeta {
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
+    /// "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or "" (no
+    /// required reviews and none given).
+    #[serde(default)]
+    pub review_decision: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -123,7 +127,7 @@ pub fn fetch_meta(loc: &PrLocator) -> Result<PrMeta> {
         &loc.repo_slug(),
         "--json",
         "number,title,author,state,url,body,baseRefName,headRefName,baseRefOid,headRefOid,\
-         additions,deletions,changedFiles",
+         additions,deletions,changedFiles,reviewDecision",
     ])?;
     serde_json::from_str(&json).context("unexpected gh pr view JSON")
 }
@@ -229,6 +233,34 @@ pub fn post_review_comment(
         "-F",
         &format!("line={line}"),
     ])?;
+    Ok(())
+}
+
+/// The verdict of a top-level PR review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+/// Submit a top-level review on the PR. GitHub requires a non-empty body for
+/// request-changes and comment reviews (the caller enforces this so the
+/// error surfaces before a network round-trip); approvals may be bodyless.
+pub fn submit_review(loc: &PrLocator, verdict: ReviewVerdict, body: &str) -> Result<()> {
+    let number = loc.number.to_string();
+    let slug = loc.repo_slug();
+    let flag = match verdict {
+        ReviewVerdict::Approve => "--approve",
+        ReviewVerdict::RequestChanges => "--request-changes",
+        ReviewVerdict::Comment => "--comment",
+    };
+    let mut args = vec!["pr", "review", &number, "--repo", &slug, flag];
+    if !body.is_empty() {
+        args.push("--body");
+        args.push(body);
+    }
+    gh(&args)?;
     Ok(())
 }
 
@@ -436,11 +468,17 @@ mod tests {
             "url": "https://github.com/o/r/pull/1",
             "baseRefName": "main", "headRefName": "feat",
             "baseRefOid": "abc123", "headRefOid": "def456",
-            "additions": 1, "deletions": 2, "changedFiles": 3
+            "additions": 1, "deletions": 2, "changedFiles": 3, "reviewDecision": "CHANGES_REQUESTED"
         }"#;
         let meta: PrMeta = serde_json::from_str(json).unwrap();
         assert_eq!(meta.base_ref_oid, "abc123");
         assert_eq!(meta.head_ref_oid, "def456");
+        assert_eq!(meta.review_decision, "CHANGES_REQUESTED");
+
+        // Older gh output without the field still deserializes.
+        let json = json.replace(r#", "reviewDecision": "CHANGES_REQUESTED""#, "");
+        let meta: PrMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta.review_decision, "");
     }
 
     #[test]

@@ -45,7 +45,7 @@ actions!(
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
         PaletteDown, PaletteBack, ClearSelection, CopySelection, FocusTreeFilter, ToggleMinimap,
-        ToggleComments, ToggleChat
+        ToggleComments, ToggleChat, SubmitReview
     ]
 );
 
@@ -91,6 +91,8 @@ fn main() {
                 KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
                 KeyBinding::new("c", ToggleComments, Some("ReviewApp")),
                 KeyBinding::new("r", Refresh, Some("ReviewApp")),
+                // Finish the review: approve / request changes / comment.
+                KeyBinding::new("cmd-enter", SubmitReview, Some("ReviewApp")),
                 // Only while the diff pane has focus; typing `/` in any input
                 // stays a plain character.
                 KeyBinding::new("/", FocusTreeFilter, Some("ReviewApp")),
@@ -119,6 +121,13 @@ fn main() {
                 KeyBinding::new("down", PaletteDown, Some("Palette > Input")),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            // One window is the whole app: closing it quits the process.
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             cx.open_window(
@@ -2491,7 +2500,7 @@ fn app_title(detail: Option<String>) -> gpui::AnyElement {
     title.into_any_element()
 }
 
-fn pr_titlebar_content(meta: &gh::PrMeta) -> gpui::AnyElement {
+fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::AnyElement {
     let (state_color, state_label) = match meta.state.as_str() {
         "OPEN" => (theme::green(), "open"),
         "MERGED" => (theme::mauve(), "merged"),
@@ -2499,6 +2508,12 @@ fn pr_titlebar_content(meta: &gh::PrMeta) -> gpui::AnyElement {
         other => (theme::overlay0(), other),
     };
     let state: Hsla = state_color.into();
+    // The PR's overall review decision, when it has one.
+    let decision = match meta.review_decision.as_str() {
+        "APPROVED" => Some((theme::green(), "approved")),
+        "CHANGES_REQUESTED" => Some((theme::red(), "changes requested")),
+        _ => None,
+    };
     let url = meta.url.clone();
     div()
         .flex()
@@ -2533,7 +2548,15 @@ fn pr_titlebar_content(meta: &gh::PrMeta) -> gpui::AnyElement {
                         .text_color(theme::subtext())
                         .whitespace_nowrap()
                         .child(SharedString::from(format!("by {}", meta.author.login))),
-                ),
+                )
+                .when_some(decision, |row, (color, label)| {
+                    let tint: Hsla = color.into();
+                    row.child(
+                        Tag::custom(tint.opacity(0.15), tint, tint.opacity(0.4))
+                            .small()
+                            .child(SharedString::from(label.to_string())),
+                    )
+                }),
         )
         .child(
             div()
@@ -2561,7 +2584,18 @@ fn pr_titlebar_content(meta: &gh::PrMeta) -> gpui::AnyElement {
                         .ghost()
                         .xsmall()
                         .on_click(move |_, _, cx| cx.open_url(&url)),
-                ),
+                )
+                .when(meta.state == "OPEN", |row| {
+                    row.child(
+                        Button::new("submit-review")
+                            .label("Review")
+                            .primary()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_review(window, cx);
+                            })),
+                    )
+                }),
         )
         .into_any_element()
 }
@@ -2770,6 +2804,17 @@ struct Composer {
     /// Display row the composer is anchored beneath (best effort; goes stale
     /// harmlessly if rows rebuild while it is open).
     row_ix: usize,
+    input: gpui::Entity<InputState>,
+    error: Option<SharedString>,
+    in_flight: bool,
+    _subscription: Subscription,
+}
+
+/// The "submit review" modal: a verdict (approve / request changes /
+/// comment) plus an optional body, targeting the item it was opened on.
+struct ReviewDialog {
+    item_id: u64,
+    verdict: gh::ReviewVerdict,
     input: gpui::Entity<InputState>,
     error: Option<SharedString>,
     in_flight: bool,
@@ -3072,6 +3117,10 @@ struct ReviewApp {
     /// Bumped on every composer open/close; an in-flight post only reports
     /// back into the composer generation it was submitted from.
     composer_gen: u64,
+    review: Option<ReviewDialog>,
+    /// Bumped on every review-dialog open/close, same protocol as
+    /// `composer_gen`.
+    review_gen: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -3176,6 +3225,8 @@ impl ReviewApp {
             hover_plus: None,
             composer: None,
             composer_gen: 0,
+            review: None,
+            review_gen: 0,
             _subscriptions,
         };
         for source in sources {
@@ -4141,6 +4192,142 @@ impl ReviewApp {
         .detach();
     }
 
+    /// Open the "submit review" modal for the active item (PR items only).
+    fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.active_item() else {
+            return;
+        };
+        let Source::Pr(_) = item.source else {
+            return;
+        };
+        let ItemState::Ready(_) = item.state else {
+            return;
+        };
+        let item_id = item.id;
+        self.review_gen += 1;
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(3, 8)
+                .placeholder("leave a review comment… (optional when approving)")
+        });
+        let _subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                    this.submit_review(window, cx);
+                }
+            },
+        );
+        input.update(cx, |state, cx| state.focus(window, cx));
+        self.review = Some(ReviewDialog {
+            item_id,
+            verdict: gh::ReviewVerdict::Approve,
+            input,
+            error: None,
+            in_flight: false,
+            _subscription,
+        });
+        cx.notify();
+    }
+
+    fn close_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review.take().is_some() {
+            self.review_gen += 1;
+            window.focus(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    /// Submit the review via gh on the background executor. Success closes
+    /// the dialog and refetches the PR meta (so the titlebar's decision tag
+    /// updates); failure surfaces gh's stderr inline in the dialog.
+    fn submit_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(review) = &self.review else {
+            return;
+        };
+        if review.in_flight {
+            return;
+        }
+        let body = review.input.read(cx).value().trim().to_string();
+        let verdict = review.verdict;
+        // GitHub rejects bodyless request-changes/comment reviews; fail
+        // locally with a clearer message.
+        if body.is_empty() && verdict != gh::ReviewVerdict::Approve {
+            if let Some(review) = &mut self.review {
+                review.error = Some("this review type needs a comment".into());
+            }
+            cx.notify();
+            return;
+        }
+        let Some(item) = self.items.iter().find(|item| item.id == review.item_id) else {
+            return;
+        };
+        let Source::Pr(loc) = &item.source else {
+            return;
+        };
+        let loc = loc.clone();
+        let item_id = item.id;
+        let gen = self.review_gen;
+        if let Some(review) = &mut self.review {
+            review.in_flight = true;
+            review.error = None;
+        }
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let submit_loc = loc.clone();
+            let result = cx
+                .background_spawn(async move { gh::submit_review(&submit_loc, verdict, &body) })
+                .await;
+            this.update_in(cx, |app, window, cx| {
+                if app.review_gen != gen {
+                    return; // The dialog was closed and reopened meanwhile.
+                }
+                match result {
+                    Ok(()) => {
+                        app.close_review(window, cx);
+                        app.refetch_meta(item_id, loc, cx);
+                    }
+                    Err(err) => {
+                        if let Some(review) = &mut app.review {
+                            review.in_flight = false;
+                            review.error = Some(format!("{err:#}").into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Refetch only the PR meta — the post-review counterpart of
+    /// `refetch_comments`, so the titlebar reflects the new review decision
+    /// without reloading the whole diff.
+    fn refetch_meta(&mut self, item_id: u64, loc: gh::PrLocator, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let fetched = cx.background_spawn(async move { gh::fetch_meta(&loc) }).await;
+            this.update(cx, |app, cx| {
+                let Some(item) = app.items.iter_mut().find(|item| item.id == item_id) else {
+                    return;
+                };
+                let ItemState::Ready(data) = &mut item.state else {
+                    return;
+                };
+                match fetched {
+                    Ok(meta) => data.pr_meta = Some(meta),
+                    Err(err) => {
+                        item.refresh_error = Some(format!("meta refresh failed: {err:#}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The chat state of the item with `item_id`, if it is still open and
     /// loaded. Chat tasks address items by id so streams land on the right
     /// transcript regardless of switching/closing.
@@ -4850,6 +5037,147 @@ impl ReviewApp {
             .into_any_element()
     }
 
+    /// The "submit review" modal: a dimming backdrop (click closes) over a
+    /// centered card with the verdict picker, body input, and submit row.
+    /// Root-level for the same reason as the composer: its input must sit
+    /// outside the "ReviewApp" key context.
+    fn render_review(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let empty = || div().into_any_element();
+        let Some(review) = &self.review else {
+            return empty();
+        };
+        // Only render for the item it was opened on, and only while active.
+        if self.items.get(self.active).map(|item| item.id) != Some(review.item_id) {
+            return empty();
+        }
+        let selected = review.verdict;
+        let verdict_option = |label: &'static str, verdict: gh::ReviewVerdict, color: gpui::Rgba| {
+            let tint: Hsla = color.into();
+            div()
+                .id(label)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .cursor_pointer()
+                .when(verdict == selected, |opt| {
+                    opt.bg(tint.opacity(0.15))
+                        .border_color(tint.opacity(0.6))
+                        .text_color(color)
+                })
+                .when(verdict != selected, |opt| {
+                    opt.border_color(theme::surface0())
+                        .text_color(theme::subtext())
+                        .hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(review) = &mut this.review {
+                        review.verdict = verdict;
+                        review.error = None;
+                        cx.notify();
+                    }
+                }))
+                .child(SharedString::from(label))
+        };
+        let submit_label = match selected {
+            gh::ReviewVerdict::Approve => "Approve",
+            gh::ReviewVerdict::RequestChanges => "Request changes",
+            gh::ReviewVerdict::Comment => "Comment",
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.))
+            .bg(theme::palette_backdrop())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close_review(window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .w(px(560.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // The input propagates Escape when it has nothing of its
+                    // own to dismiss; catch it here to cancel the dialog.
+                    .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                        this.close_review(window, cx);
+                    }))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme::surface0())
+                    .bg(theme::mantle())
+                    .shadow_lg()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .text_color(theme::overlay0())
+                            .child(SharedString::from("Finish your review")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(verdict_option("approve", gh::ReviewVerdict::Approve, theme::green()))
+                            .child(verdict_option(
+                                "request changes",
+                                gh::ReviewVerdict::RequestChanges,
+                                theme::red(),
+                            ))
+                            .child(verdict_option("comment", gh::ReviewVerdict::Comment, theme::blue())),
+                    )
+                    .child(Input::new(&review.input))
+                    .when_some(review.error.clone(), |card, err| {
+                        card.child(div().text_color(theme::red()).child(err))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.))
+                                    .text_color(theme::overlay0())
+                                    .child(SharedString::from("⌘⏎ to submit")),
+                            )
+                            .child(
+                                Button::new("review-cancel")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_review(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("review-submit")
+                                    .label(submit_label)
+                                    .primary()
+                                    .small()
+                                    .disabled(review.in_flight)
+                                    .loading(review.in_flight)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.submit_review(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The minimap column: precomputed, coalesced quad runs plus one
     /// per-frame viewport rectangle, painted straight into a canvas (no text,
     /// no per-row elements). Mouse-downs stop propagation here so the pane's
@@ -4946,13 +5274,13 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    fn render_titlebar(&self) -> impl IntoElement {
+    fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let content: gpui::AnyElement = match self.active_item() {
             None => app_title(None),
             Some(item) => match &item.state {
                 ItemState::Ready(data) => match &item.source {
                     Source::Pr(_) => match &data.pr_meta {
-                        Some(meta) => pr_titlebar_content(meta),
+                        Some(meta) => pr_titlebar_content(meta, cx),
                         None => app_title(None),
                     },
                     Source::Local(src) => local_titlebar_content(src, data),
@@ -5449,6 +5777,7 @@ impl ReviewApp {
             .child(hint(&["cmd-b"], "sidebar"))
             .child(hint(&["cmd-j"], "chat"))
             .child(hint(&["r"], "refresh"))
+            .child(hint(&["cmd-enter"], "review"))
     }
 }
 
@@ -5631,6 +5960,15 @@ impl Render for ReviewApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleComments, _, cx| this.toggle_comments(cx)))
+            .on_action(cx.listener(|this, _: &SubmitReview, window, cx| {
+                // Backstop: with the dialog open, focus sits in its input,
+                // whose own secondary-enter handles submission.
+                if this.review.is_some() {
+                    this.submit_review(window, cx);
+                } else {
+                    this.open_review(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleChat, window, cx| {
                 this.toggle_chat(window, cx)
             }))
@@ -5710,7 +6048,7 @@ impl Render for ReviewApp {
                 window.focus(&this.focus_handle);
                 cx.notify();
             }))
-            .child(self.render_titlebar())
+            .child(self.render_titlebar(cx))
             .child(
                 div()
                     .flex_1()
@@ -5741,6 +6079,9 @@ impl Render for ReviewApp {
             // context (plain letters must stay text, like the palette input).
             .when(self.composer.is_some(), |root| {
                 root.child(self.render_composer(cx))
+            })
+            .when(self.review.is_some(), |root| {
+                root.child(self.render_review(cx))
             })
             .when(self.palette.is_some(), |root| {
                 root.child(self.render_palette(cx))
@@ -7114,6 +7455,7 @@ mod tests {
             additions: 1,
             deletions: 2,
             changed_files: 3,
+            review_decision: String::new(),
         };
         let header = pr_chat_header(&meta);
         assert!(header.contains("\"Fix the frobnicator\""));
