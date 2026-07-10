@@ -8,6 +8,22 @@ Requires the [GitHub CLI](https://cli.github.com/) (`gh auth login` first), othe
 
 This is 100% vibe coded. I have not read the code. 
 
+## Setup
+
+Grab [LGTM.dmg](https://github.com/ellie/lgtm/releases/download/latest/LGTM.dmg) from the latest release (built from every commit on main, Apple Silicon only), open it, and drag LGTM to Applications.
+
+The app is unsigned, so on first launch macOS will complain — right-click the app and choose Open, or:
+
+```sh
+xattr -d com.apple.quarantine /Applications/LGTM.app
+```
+
+Or build from source:
+
+```sh
+cargo run --release
+```
+
 ## Features
 - unified + split views
 - tree-sitter highlighting (18 languages),
