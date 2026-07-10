@@ -40,7 +40,7 @@ const SPLIT_GUTTER: f32 = 44. + 28.;
 const SPLIT_DIVIDER: f32 = 6.0;
 
 actions!(
-    review,
+    lgtm,
     [
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
@@ -125,7 +125,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("review".into()),
+                        title: Some("lgtm".into()),
                         ..TitleBar::title_bar_options()
                     }),
                     ..Default::default()
@@ -2348,7 +2348,7 @@ struct UpgradedFile {
 fn run_upgrade(source: &UpgradeSource, mut jobs: Vec<UpgradeJob>) -> Vec<UpgradedFile> {
     if jobs.len() > MAX_UPGRADE_FILES {
         eprintln!(
-            "review: {} changed files; upgrading the first {MAX_UPGRADE_FILES} to full \
+            "lgtm: {} changed files; upgrading the first {MAX_UPGRADE_FILES} to full \
              contents, the rest stay patch-derived",
             jobs.len()
         );
@@ -2382,7 +2382,7 @@ fn fetch_side(source: &UpgradeSource, path: &str, old: bool) -> Option<String> {
             match gh::fetch_file_at(loc, oid, path) {
                 Ok(text) => text?,
                 Err(err) => {
-                    eprintln!("review: {path}: {err:#}");
+                    eprintln!("lgtm: {path}: {err:#}");
                     return None;
                 }
             }
@@ -2478,7 +2478,7 @@ fn app_title(detail: Option<String>) -> gpui::AnyElement {
         .child(
             div()
                 .font_weight(gpui::FontWeight::BOLD)
-                .child(SharedString::from("review")),
+                .child(SharedString::from("lgtm")),
         );
     if let Some(detail) = detail {
         title = title.child(
@@ -2984,7 +2984,7 @@ fn selection_info(
 /// pid: item ids restart at 0 every run, and stale dirs from another process
 /// must never be reused.
 fn chat_scratch_root(item_id: u64) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("review-chat-{}-{item_id}", std::process::id()))
+    std::env::temp_dir().join(format!("lgtm-chat-{}-{item_id}", std::process::id()))
 }
 
 /// A repo-relative path mapped under `root`, preserving the layout. Rejects
@@ -7170,7 +7170,7 @@ mod tests {
 
     #[test]
     fn scratch_paths_stay_inside_the_root() {
-        let root = Path::new("/tmp/review-chat-1-2");
+        let root = Path::new("/tmp/lgtm-chat-1-2");
         assert_eq!(
             scratch_path(root, "src/main.rs"),
             Some(root.join("src/main.rs"))
@@ -7190,7 +7190,7 @@ mod tests {
     #[test]
     fn materialize_writes_files_and_skips_oversized_and_unsafe() {
         let root = std::env::temp_dir().join(format!(
-            "review-chat-test-{}-{:?}",
+            "lgtm-chat-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

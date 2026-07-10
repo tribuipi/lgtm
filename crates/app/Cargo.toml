@@ -1,10 +1,10 @@
 [package]
-name = "review"
+name = "lgtm"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "review"
+name = "lgtm"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,24 +1,27 @@
-# review
+# lgtm
 
-A fast, native code-review app in Rust on [gpui](https://www.gpui.rs/).
-See [DESIGN.md](DESIGN.md) for the full design.
+![](./screenies/lgtm.jpeg)
 
-## Usage
+A fast, native code-review app in Rust, built with [gpui](https://www.gpui.rs/).
 
-Requires the [GitHub CLI](https://cli.github.com/) (`gh auth login` first).
+Requires the [GitHub CLI](https://cli.github.com/) (`gh auth login` first), otherwise you can only review code locally.
 
-```
-review owner/repo#123
-review 123                      # repo inferred from the cwd's git remote
-review https://github.com/owner/repo/pull/123
-```
+This is 100% vibe coded. I have not read the code. 
 
-Open several things at once: `review owner/repo#123 other/repo#7 .`
-A bare path (or no args inside a git repo) shows the local pre-push
-preview — working tree vs merge-base with the default branch.
+## Features
+- unified + split views
+- tree-sitter highlighting (18 languages),
+- word-level intra-line diffs, 
+- multi-item sidebar with file tree
+- cmd-k palette with fuzzy PR picker, 
+- local repo diffs
+- minimap,
+- inline GitHub review comments (reading + posting, hover a line for +)
 
-## Keys
+Coming: LSP, AI inline review annotations
 
+
+## Keymap
 | Key | Action |
 |---|---|
 | `cmd-k` | open palette (GitHub PR picker / folder) |
@@ -36,12 +39,3 @@ preview — working tree vs merge-base with the default branch.
 | `cmd-c` | copy selection |
 | `cmd-q` | quit |
 
-## Status
-
-Working: unified + split views, tree-sitter highlighting (18 languages),
-word-level intra-line diffs, multi-item sidebar with file tree, cmd-k
-palette with fuzzy PR picker, local repo diffs, full-content blob
-upgrade with expand-context and offline cache, text selection, minimap,
-inline GitHub review comments (reading + posting, hover a line for +),
-and a per-item Claude Code chat panel with read-only repo exploration.
-Next: LSP, AI inline review annotations — see DESIGN.md.
