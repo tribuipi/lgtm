@@ -29,6 +29,8 @@ preview — working tree vs merge-base with the default branch.
 | `v` | unified ↔ split view |
 | `/` | fuzzy file filter |
 | `m` | toggle minimap |
+| `c` | toggle inline comments |
+| `cmd-j` | chat with Claude Code |
 | `r` | refresh active item |
 | `home` / `end` | top / bottom |
 | `cmd-c` | copy selection |
@@ -39,5 +41,7 @@ preview — working tree vs merge-base with the default branch.
 Working: unified + split views, tree-sitter highlighting (18 languages),
 word-level intra-line diffs, multi-item sidebar with file tree, cmd-k
 palette with fuzzy PR picker, local repo diffs, full-content blob
-upgrade with expand-context and offline cache, text selection, minimap.
-Next: Helix theme loading, then AI/LSP — see DESIGN.md.
+upgrade with expand-context and offline cache, text selection, minimap,
+inline GitHub review comments (reading + posting, hover a line for +),
+and a per-item Claude Code chat panel with read-only repo exploration.
+Next: LSP, AI inline review annotations — see DESIGN.md.
