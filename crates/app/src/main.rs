@@ -4996,8 +4996,17 @@ impl ReviewApp {
         let pane_h = f32::from(bounds.size.height);
         let row_y = composer.row_ix as f32 * row_height + f32::from(offset.y);
         let y = f32::from(bounds.top()) + (row_y + row_height).clamp(8., (pane_h - 250.).max(8.));
-        let x = (f32::from(bounds.left()) + 72.)
-            .min((f32::from(bounds.right()) - 528.).max(8.));
+        // Anchor to the panel the comment targets: right split rows start
+        // past the left half and divider, mirroring render_plus.
+        let base_x = if data.mode == ViewMode::Split && composer.side == CommentSide::Right {
+            f32::from(bounds.left())
+                + (f32::from(bounds.size.width) - SPLIT_DIVIDER) / 2.
+                + SPLIT_DIVIDER
+                + SPLIT_GUTTER
+        } else {
+            f32::from(bounds.left()) + 72.
+        };
+        let x = base_x.min((f32::from(bounds.right()) - 528.).max(8.));
         let action = if composer.reply_to.is_some() {
             "Reply"
         } else {
