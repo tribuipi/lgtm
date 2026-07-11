@@ -206,10 +206,17 @@ impl ReviewApp {
                 }
             }));
         for name in theme::all_names() {
+            // `active` (row highlight) follows the *previewed* theme; `selected`
+            // (right-side tick) marks the *committed* one, so while you hover to
+            // preview others the tick still shows what's actually chosen.
             let active = *name == current;
+            let selected = *name == baseline;
             theme_list = theme_list.child(
                 div()
                     .id(*name)
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .px_2()
                     .py_1()
                     .rounded_md()
@@ -235,7 +242,14 @@ impl ReviewApp {
                         }
                         apply_and_save(this, window, cx);
                     }))
-                    .child(SharedString::from(*name)),
+                    .child(SharedString::from(*name))
+                    .when(selected, |row| {
+                        row.child(
+                            gpui_component::Icon::new(gpui_component::IconName::Check)
+                                .with_size(Size::Small)
+                                .text_color(theme::green()),
+                        )
+                    }),
             );
         }
 
