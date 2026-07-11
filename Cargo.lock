@@ -3214,13 +3214,16 @@ dependencies = [
  "anyhow",
  "claude",
  "diff-core",
+ "dirs 5.0.1",
  "fuzzy-matcher",
  "gh",
  "git",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "serde",
  "syntax",
+ "toml 0.8.23",
 ]
 
 [[package]]
