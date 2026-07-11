@@ -1,6 +1,9 @@
 //! In-app settings modal, opened with `cmd-,` (see `OpenSettings` in
-//! main.rs). Lets the user swap theme, UI font, code font, and font size;
-//! every change is applied live and persisted immediately.
+//! main.rs). Lets the user swap theme, UI font, code font, and font size.
+//! Font and size changes apply + persist immediately on selection. Themes
+//! preview live *while you hover* the theme list (no save); a theme only
+//! sticks — and is written to disk — when you click it. Leaving the list or
+//! closing the modal reverts an unclicked preview to the committed theme.
 //!
 //! Kept out of main.rs to bound that file's growth. `render_settings` is
 //! implemented as a method on `ReviewApp` below (in an `impl` block, same
@@ -9,7 +12,10 @@
 //! this submodule is a descendant of the crate root where `ReviewApp` is
 //! defined, so private-to-crate-root items are visible here.
 
-use gpui::{div, prelude::*, px, Context, Entity, FocusHandle, MouseButton, SharedString, Subscription, Window};
+use gpui::{
+    div, prelude::*, px, Context, Entity, FocusHandle, Hsla, MouseButton, SharedString,
+    Subscription, Window,
+};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     select::{SearchableVec, Select, SelectState},
@@ -22,10 +28,14 @@ pub struct SettingsUi {
     /// Card focus target so the "Settings" key-context (Escape-to-close) is
     /// active whenever the modal is up. See `render_settings`.
     pub focus_handle: FocusHandle,
-    pub theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// The committed (persisted) theme when the modal opened, updated on every
+    /// theme *click*. Hovering a theme row previews it live without saving;
+    /// leaving the list — or closing the modal — reverts to this baseline. So
+    /// browsing themes is a true preview that only sticks when clicked.
+    pub baseline_theme: String,
     pub ui_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub code_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
-    /// Holds the three `SelectEvent` subscriptions alive for the modal's
+    /// Holds the two font `SelectEvent` subscriptions alive for the modal's
     /// lifetime; dropped (and thus unsubscribed) when the modal closes.
     pub _subs: Vec<Subscription>,
 }
@@ -66,6 +76,20 @@ pub fn apply_and_save(app: &mut ReviewApp, window: &mut Window, cx: &mut Context
     cx.notify();
 }
 
+/// Apply `name` as the active theme for live preview — updates the global so
+/// the whole UI (chrome, syntax, tints) repaints in it and forces a diff
+/// re-measure, but does NOT persist. Reverting is just another `preview_theme`
+/// call with the baseline name. Committing is `apply_and_save` (which saves).
+///
+/// Upholds the same `theme_name`→`apply_ui_theme` invariant as `apply_and_save`.
+fn preview_theme(app: &mut ReviewApp, name: &str, cx: &mut Context<ReviewApp>) {
+    let name = name.to_string();
+    cx.update_global::<settings::Settings, _>(|s, _| s.theme_name = name.clone());
+    theme::apply_ui_theme(&theme::by_name(&name), cx);
+    app.char_width = None;
+    cx.notify();
+}
+
 /// One labeled form field: a `subtext`-colored label stacked above its
 /// control.
 fn field(label: &str, control: impl IntoElement) -> impl IntoElement {
@@ -97,6 +121,12 @@ impl ReviewApp {
         let s = cx.global::<settings::Settings>().clone();
 
         let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            // Drop any lingering hover-preview back to the committed theme
+            // before closing (e.g. Escape pressed while a row is hovered).
+            let baseline = this.settings.as_ref().map(|ui| ui.baseline_theme.clone());
+            if let Some(baseline) = baseline {
+                preview_theme(this, &baseline, cx);
+            }
             this.settings = None;
             window.focus(&this.focus_handle);
             cx.notify();
@@ -141,6 +171,63 @@ impl ReviewApp {
                         apply_and_save(this, window, cx);
                     })),
             );
+
+        // Theme picker: a hover-preview list. Hovering a row applies that
+        // theme live (no save); clicking commits + persists it; leaving the
+        // list reverts to the committed baseline (see `preview_theme`).
+        let baseline = ui.baseline_theme.clone();
+        // Highlight by the *resolved* active theme name so the highlight
+        // follows the theme actually applied (by_name falls back to the
+        // default for an unknown/stale stored name).
+        let current = theme::by_name(&s.theme_name).name;
+        let mut theme_list = div()
+            .id("theme-list")
+            .flex()
+            .flex_col()
+            .max_h(px(220.))
+            .overflow_y_scroll()
+            .on_hover(cx.listener({
+                let baseline = baseline.clone();
+                move |this, hovered: &bool, _window, cx| {
+                    // Pointer left the whole list → drop the preview.
+                    if !*hovered {
+                        preview_theme(this, &baseline, cx);
+                    }
+                }
+            }));
+        for name in theme::all_names() {
+            let active = *name == current;
+            theme_list = theme_list.child(
+                div()
+                    .id(*name)
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(active, |row| {
+                        row.bg(Hsla::from(theme::surface0())).text_color(theme::text())
+                    })
+                    .when(!active, |row| {
+                        row.text_color(theme::subtext())
+                            .hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+                    })
+                    .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                        if *hovered {
+                            preview_theme(this, name, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.update_global::<settings::Settings, _>(|s, _| {
+                            s.theme_name = name.to_string()
+                        });
+                        if let Some(ui) = &mut this.settings {
+                            ui.baseline_theme = name.to_string();
+                        }
+                        apply_and_save(this, window, cx);
+                    }))
+                    .child(SharedString::from(*name)),
+            );
+        }
 
         // Code-font field: dropdown plus a note steering users to a
         // monospace face (proportional fonts misalign the diff grid).
@@ -217,13 +304,7 @@ impl ReviewApp {
                                     })),
                             ),
                     )
-                    .child(field(
-                        "Theme",
-                        Select::new(&ui.theme_select)
-                            .with_size(Size::Small)
-                            .menu_width(px(360.))
-                            .placeholder("Theme"),
-                    ))
+                    .child(field("Theme", theme_list))
                     .child(field(
                         "UI font",
                         Select::new(&ui.ui_font_select)
@@ -247,6 +328,12 @@ impl ReviewApp {
                                         cx.update_global::<settings::Settings, _>(|s, _| {
                                             *s = settings::Settings::default();
                                         });
+                                        // Reset changes the theme too, so move
+                                        // the preview baseline with it.
+                                        let default_theme = settings::Settings::default().theme_name;
+                                        if let Some(ui) = &mut this.settings {
+                                            ui.baseline_theme = default_theme;
+                                        }
                                         apply_and_save(this, window, cx);
                                     })),
                             ),

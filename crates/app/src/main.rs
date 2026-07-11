@@ -6017,22 +6017,6 @@ impl Render for ReviewApp {
                 }
                 let s = cx.global::<settings::Settings>().clone();
 
-                // Theme dropdown, preselected to the active theme.
-                let theme_names: Vec<SharedString> =
-                    theme::all_names().iter().map(|n| SharedString::from(*n)).collect();
-                // Match on the canonically-resolved name (by_name falls back
-                // to the default theme for unknown names), so the dropdown
-                // preselects the theme actually in effect.
-                let active_theme = theme::by_name(&s.theme_name).name;
-                let theme_ix = theme_names
-                    .iter()
-                    .position(|n| n.as_ref() == active_theme)
-                    .map(IndexPath::new);
-                let theme_select = cx.new(|cx| {
-                    SelectState::new(SearchableVec::new(theme_names), theme_ix, window, cx)
-                        .searchable(true)
-                });
-
                 // Font dropdowns, preselected to the active UI / code fonts.
                 let font_names: Vec<SharedString> =
                     settings_ui::all_font_names(cx).into_iter().map(SharedString::from).collect();
@@ -6054,26 +6038,10 @@ impl Render for ReviewApp {
                         .searchable(true)
                 });
 
-                // Each confirmed selection updates the global setting and
-                // applies + persists it live.
+                // Each confirmed font selection updates the global setting and
+                // applies + persists it live. (Theme uses a hover-preview list
+                // in render_settings, not a dropdown.)
                 let subs = vec![
-                    cx.subscribe_in(
-                        &theme_select,
-                        window,
-                        |this,
-                         _,
-                         ev: &SelectEvent<SearchableVec<SharedString>>,
-                         window,
-                         cx| {
-                            if let SelectEvent::Confirm(Some(name)) = ev {
-                                let name = name.to_string();
-                                cx.update_global::<settings::Settings, _>(|s, _| {
-                                    s.theme_name = name.clone()
-                                });
-                                settings_ui::apply_and_save(this, window, cx);
-                            }
-                        },
-                    ),
                     cx.subscribe_in(
                         &ui_font_select,
                         window,
@@ -6114,7 +6082,7 @@ impl Render for ReviewApp {
                 window.focus(&focus_handle);
                 this.settings = Some(settings_ui::SettingsUi {
                     focus_handle,
-                    theme_select,
+                    baseline_theme: s.theme_name.clone(),
                     ui_font_select,
                     code_font_select,
                     _subs: subs,
