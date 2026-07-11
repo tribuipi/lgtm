@@ -14,6 +14,10 @@ const SIZE_MAX: f32 = 32.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Persisted theme name. Resolved at boot via `theme::load_active`: the
+    /// embedded Catppuccin Mocha applies with zero disk access; any other name
+    /// is targeted-resolved from the theme dirs, falling back to Mocha when the
+    /// named theme is absent (e.g. a config naming a no-longer-bundled family).
     pub theme_name: String,
     pub ui_font: Option<String>,
     pub code_font: String,

@@ -16,8 +16,7 @@ pub use model::{Appearance, SyntaxStyle, Theme};
 
 mod embedded;
 mod model;
-// mod registry; — DEFERRED: registry.rs does not exist until Task 5. Leave this
-// commented out now; uncomment it in Task 5 Step 4 when the file is created.
+mod registry;
 mod resolver;
 mod zed;
 
@@ -207,14 +206,14 @@ pub fn removed_word_bg(theme: &Theme) -> Rgba {
 }
 
 /// Resolve a persisted theme name to a concrete `Theme` for boot/preview. The
-/// embedded default needs zero disk access; any other name currently falls
-/// back to the embedded default (disk targeted-resolve is added in a later
-/// task). Never fails.
+/// embedded default needs zero disk access; any other name triggers a targeted
+/// disk scan (parse only until the variant is found). A name that is nowhere on
+/// disk falls back to the embedded default, so boot never fails.
 pub fn load_active(name: &str) -> Theme {
     if name == "Catppuccin Mocha" {
         return embedded_mocha();
     }
-    embedded_mocha()
+    registry::resolve_named_in(&registry::theme_dirs(), name).unwrap_or_else(embedded_mocha)
 }
 
 /// Interim: names available for the picker. Replaced by the registry in the
