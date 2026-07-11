@@ -6099,12 +6099,45 @@ impl Render for ReviewApp {
 
                 let focus_handle = cx.focus_handle();
                 window.focus(&focus_handle);
-                // Keyboard cursor starts on the active (resolved) theme.
+                // Seed the picker synchronously (embedded default + active
+                // theme) so it's never empty; the background scan fills in
+                // disk themes and flips the state to Ready.
+                let seed = theme::ThemeRegistry::seeded(theme::active());
+                // Keyboard cursor starts on the active (resolved) theme's row
+                // in the seeded registry.
                 let active_theme = s.theme_name.clone();
-                let theme_cursor = theme::available_names()
+                let theme_cursor = seed
+                    .names()
                     .iter()
                     .position(|n| *n == active_theme)
                     .unwrap_or(0);
+                // Offload the blocking filesystem scan + JSON parse to a
+                // background thread, then merge the results back into the
+                // (still-open) modal's registry and mark discovery Ready.
+                // Not detached: the returned Task is stored on SettingsUi, so
+                // closing the modal (settings = None) cancels the scan.
+                let discovery_task = cx.spawn_in(window, async move |this, cx| {
+                    let found = cx.background_spawn(async move { theme::discover() }).await;
+                    this.update(cx, |app, cx| {
+                        if let Some(ui) = &mut app.settings {
+                            let reg = match std::mem::replace(
+                                &mut ui.discovery,
+                                settings_ui::Discovery::Loading(theme::ThemeRegistry::seeded(
+                                    theme::active(),
+                                )),
+                            ) {
+                                settings_ui::Discovery::Loading(mut r)
+                                | settings_ui::Discovery::Ready(mut r) => {
+                                    r.merge(found);
+                                    r
+                                }
+                            };
+                            ui.discovery = settings_ui::Discovery::Ready(reg);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                });
                 this.settings = Some(settings_ui::SettingsUi {
                     focus_handle,
                     // Canonical resolved name (not the raw stored string), so
@@ -6114,6 +6147,8 @@ impl Render for ReviewApp {
                     theme_cursor,
                     ui_font_select,
                     code_font_select,
+                    discovery: settings_ui::Discovery::Loading(seed),
+                    _discovery_task: discovery_task,
                     _subs: subs,
                 });
                 cx.notify();

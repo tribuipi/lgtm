@@ -24,6 +24,25 @@ use gpui_component::{
 
 use crate::{settings, theme, ReviewApp};
 
+/// Theme-discovery state for the open settings modal. Seeded synchronously so
+/// the picker always has at least the embedded default + active theme; a
+/// background task fills in disk themes and flips this to `Ready`.
+pub enum Discovery {
+    Loading(theme::ThemeRegistry),
+    Ready(theme::ThemeRegistry),
+}
+
+impl Discovery {
+    pub fn registry(&self) -> &theme::ThemeRegistry {
+        match self {
+            Discovery::Loading(r) | Discovery::Ready(r) => r,
+        }
+    }
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Discovery::Loading(_))
+    }
+}
+
 pub struct SettingsUi {
     /// Card focus target so the "Settings" key-context (Escape-to-close) is
     /// active whenever the modal is up. See `render_settings`.
@@ -33,12 +52,18 @@ pub struct SettingsUi {
     /// leaving the list — or closing the modal — reverts to this baseline. So
     /// browsing themes is a true preview that only sticks when clicked.
     pub baseline_theme: String,
-    /// Index into `theme::available_names()` of the row the keyboard cursor / mouse
-    /// hover is on (and thus the theme being previewed). Kept in sync by both
-    /// arrow-key nav and hover so the highlight is single-sourced.
+    /// Index into the registry's `names()` of the row the keyboard cursor /
+    /// mouse hover is on (and thus the theme being previewed). Kept in sync by
+    /// both arrow-key nav and hover so the highlight is single-sourced.
     pub theme_cursor: usize,
     pub ui_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub code_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// Theme registry + discovery status. Seeded on open, filled by a
+    /// background scan, dropped when the modal closes.
+    pub discovery: Discovery,
+    /// The background discovery task; dropping it (with the modal) cancels an
+    /// in-flight scan.
+    pub _discovery_task: gpui::Task<()>,
     /// Holds the two font `SelectEvent` subscriptions alive for the modal's
     /// lifetime; dropped (and thus unsubscribed) when the modal closes.
     pub _subs: Vec<Subscription>,
@@ -81,7 +106,15 @@ pub fn apply_and_save(app: &mut ReviewApp, window: &mut Window, cx: &mut Context
         cx.update_global::<settings::Settings, _>(|s, _| s.theme_name = baseline);
     }
     let s = cx.global::<settings::Settings>().clone();
-    theme::apply_ui_theme(&theme::load_active(&s.theme_name), cx);
+    // The registry already holds resolved themes; apply directly (no
+    // re-resolve). Fall back to a targeted disk resolve if the committed name
+    // somehow isn't in the registry.
+    let resolved = app
+        .settings
+        .as_ref()
+        .and_then(|ui| ui.discovery.registry().get(&s.theme_name).cloned())
+        .unwrap_or_else(|| theme::load_active(&s.theme_name));
+    theme::apply_ui_theme(&resolved, cx);
     app.char_width = None;
     s.save();
     if let Some(ui) = &app.settings {
@@ -98,8 +131,15 @@ pub fn apply_and_save(app: &mut ReviewApp, window: &mut Window, cx: &mut Context
 /// Upholds the same `theme_name`→`apply_ui_theme` invariant as `apply_and_save`.
 fn preview_theme(app: &mut ReviewApp, name: &str, cx: &mut Context<ReviewApp>) {
     let name = name.to_string();
+    // Apply the already-resolved theme straight from the registry; only fall
+    // back to a disk resolve if the name isn't present.
+    let resolved = app
+        .settings
+        .as_ref()
+        .and_then(|ui| ui.discovery.registry().get(&name).cloned())
+        .unwrap_or_else(|| theme::load_active(&name));
     cx.update_global::<settings::Settings, _>(|s, _| s.theme_name = name.clone());
-    theme::apply_ui_theme(&theme::load_active(&name), cx);
+    theme::apply_ui_theme(&resolved, cx);
     app.char_width = None;
     cx.notify();
 }
@@ -107,8 +147,15 @@ fn preview_theme(app: &mut ReviewApp, name: &str, cx: &mut Context<ReviewApp>) {
 /// Move the theme cursor to `ix` (clamped) and preview that theme live.
 /// Shared by arrow-key nav and hover so both drive the same highlight.
 pub(crate) fn preview_theme_at(app: &mut ReviewApp, ix: usize, cx: &mut Context<ReviewApp>) {
-    let names = theme::available_names();
-    let ix = ix.min(names.len().saturating_sub(1));
+    let names = app
+        .settings
+        .as_ref()
+        .map(|ui| ui.discovery.registry().names())
+        .unwrap_or_default();
+    if names.is_empty() {
+        return;
+    }
+    let ix = ix.min(names.len() - 1);
     if let Some(ui) = &mut app.settings {
         ui.theme_cursor = ix;
     }
@@ -220,6 +267,9 @@ impl ReviewApp {
         // The cursor (arrow-key nav or hover) is the single source of the
         // highlighted/previewed row.
         let cursor = ui.theme_cursor;
+        // Rows come from the (seeded, then background-filled) registry.
+        let names = ui.discovery.registry().names();
+        let discovering = ui.discovery.is_loading();
         let mut theme_list = div()
             .id("theme-list")
             .flex()
@@ -232,15 +282,17 @@ impl ReviewApp {
                     // Pointer left the whole list → snap the cursor back to the
                     // committed theme and drop the preview.
                     if !*hovered {
-                        let ix = theme::available_names()
-                            .iter()
-                            .position(|n| *n == baseline)
+                        let ix = this
+                            .settings
+                            .as_ref()
+                            .and_then(|ui| {
+                                ui.discovery.registry().names().iter().position(|n| *n == baseline)
+                            })
                             .unwrap_or(0);
                         preview_theme_at(this, ix, cx);
                     }
                 }
             }));
-        let names = theme::available_names();
         for (i, name) in names.iter().enumerate() {
             let name = name.clone();
             // `active` (row highlight) follows the cursor (previewed theme);
@@ -282,6 +334,17 @@ impl ReviewApp {
                                 .text_color(theme::success()),
                         )
                     }),
+            );
+        }
+        // While the background scan runs, a subtle affordance below the list
+        // signals that more themes may still appear.
+        if discovering {
+            theme_list = theme_list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_color(theme::text_subtle())
+                    .child(SharedString::from("Discovering themes…")),
             );
         }
 
@@ -345,10 +408,11 @@ impl ReviewApp {
                         }
                     }))
                     .on_action(cx.listener(|this, _: &crate::SettingsThemeConfirm, window, cx| {
-                        let ix = this.settings.as_ref().map(|ui| ui.theme_cursor);
-                        if let Some(ix) = ix {
-                            let names = theme::available_names();
-                            let name = names[ix.min(names.len().saturating_sub(1))].clone();
+                        let name = this.settings.as_ref().and_then(|ui| {
+                            let names = ui.discovery.registry().names();
+                            names.get(ui.theme_cursor.min(names.len().saturating_sub(1))).cloned()
+                        });
+                        if let Some(name) = name {
                             commit_theme(this, &name, window, cx);
                         }
                     }))

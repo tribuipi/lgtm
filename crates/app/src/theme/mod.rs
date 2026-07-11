@@ -13,6 +13,7 @@ use syntax::Token;
 
 pub use embedded::embedded_mocha;
 pub use model::{Appearance, SyntaxStyle, Theme};
+pub use registry::{discover, theme_dirs, ThemeRegistry};
 
 mod embedded;
 mod model;
@@ -214,12 +215,6 @@ pub fn load_active(name: &str) -> Theme {
         return embedded_mocha();
     }
     registry::resolve_named_in(&registry::theme_dirs(), name).unwrap_or_else(embedded_mocha)
-}
-
-/// Interim: names available for the picker. Replaced by the registry in the
-/// discovery task. Only the embedded default exists until then.
-pub fn available_names() -> Vec<String> {
-    vec!["Catppuccin Mocha".to_string()]
 }
 
 #[cfg(test)]
