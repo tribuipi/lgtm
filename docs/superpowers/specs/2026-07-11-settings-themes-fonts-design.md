@@ -57,16 +57,16 @@ Settings (global)
   - `token_style(&Theme, Token) -> HighlightStyle` reads syntax colors from the theme.
   - **This `Theme` struct is the seam** a future external loader targets (parse Helix `.toml` → `Theme`).
 
-- **`settings_ui.rs` (new)** — the settings modal, a gpui `Entity`:
+- **`settings_ui.rs` (new)** — the settings modal (state on `ReviewApp`, rendered by a `render_settings` method, mirroring `render_review`):
   - Opened via a new `OpenSettings` action bound to `cmd-,` (global context, works even when an input is focused).
-  - Controls:
-    - **Theme** — list/segmented control of built-in theme names.
-    - **UI font** — fuzzy-filtered dropdown of `all_font_names()`.
-    - **Code font** — same list, with a one-line note: "Use a monospace font — others will misalign the diff."
-    - **Font size** — stepper / `+`/`−` (and a numeric field), reasonable clamp (e.g. 8–32).
+  - Layout is a **vertical form** (fields stacked, not tabs). Controls:
+    - **Theme** — searchable `gpui_component::select::Select` dropdown over `theme::all_names()`.
+    - **UI font** — searchable `Select` dropdown over `all_font_names()`.
+    - **Code font** — same, with a one-line note: "Use a monospace font — proportional fonts will misalign the diff."
+    - **Font size** — `+`/`−` stepper, clamped 8–32.
     - **Reset to defaults** button.
-  - Each change: mutate the `Settings` global → apply effects (below) → `save()` → request redraw.
-  - Modal styling and dismissal follow the existing command-palette pattern (backdrop + escape to close).
+  - Each dropdown selection emits `SelectEvent::Confirm`; the handler mutates the `Settings` global → `apply_and_save` (re-apply theme, reset `char_width`, `save()`, redraw).
+  - Modal shell mirrors `render_review` (dimming backdrop, click-outside closes). Escape-to-close is a `CloseSettings` action bound in a `"Settings"` key context, with the card `track_focus`ed so the context is active while the modal is up.
 
 ### `main.rs` changes
 
