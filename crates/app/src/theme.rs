@@ -1,6 +1,7 @@
-//! Data-driven themes. A `Theme` is a struct of palette colors + a syntax
-//! lookup; built-in constructors produce concrete themes. This struct is the
-//! seam a future external-theme loader (e.g. Helix .toml) targets.
+//! Data-driven themes. A `Theme` is a flat struct of palette colors (UI +
+//! syntax accents); built-in constructors produce concrete themes. This
+//! struct is the seam a future external-theme loader (e.g. Helix .toml)
+//! targets.
 //!
 //! The bare `base()`/`mantle()`/.../`peach()` accessors below predate this
 //! refactor. They now read a thread-local "active theme" cell that
@@ -79,9 +80,12 @@ pub fn peach() -> Rgba {
     rgb(active().peach)
 }
 
-/// A named palette + syntax mapping. Built-ins are small literals; a future
-/// external-theme loader (e.g. Helix .toml) would produce more of these at
-/// runtime.
+/// A named palette. The first block of fields drives the UI chrome
+/// (`apply_ui_theme` + the bare accessors above); the trailing accent fields
+/// (`yellow`/`lavender`/`maroon`/`sky`/`overlay2`) exist only to give
+/// `token_style` a full syntax palette. Field names follow Catppuccin's
+/// vocabulary; for other themes they simply hold that theme's color for the
+/// same *role* (e.g. `mauve` is always the keyword color).
 #[derive(Clone)]
 pub struct Theme {
     pub name: &'static str,
@@ -98,61 +102,84 @@ pub struct Theme {
     pub blue: u32,
     pub mauve: u32,
     pub peach: u32,
-    /// (color, italic) per syntax token.
-    pub syntax: fn(Token) -> (u32, bool),
+    pub yellow: u32,
+    pub lavender: u32,
+    pub maroon: u32,
+    pub sky: u32,
+    pub overlay2: u32,
 }
 
-fn mocha_syntax(token: Token) -> (u32, bool) {
-    match token {
-        Token::Keyword => (0xcba6f7, false),                  // mauve
-        Token::Function => (0x89b4fa, false),                 // blue
-        Token::Type => (0xf9e2af, false),                     // yellow
-        Token::String => (0xa6e3a1, false),                   // green
-        Token::Number | Token::Constant => (0xfab387, false), // peach
-        Token::Comment => (0x6c7086, true),                   // overlay0
-        Token::Property => (0xb4befe, false),                 // lavender
-        Token::Variable | Token::Embedded => (0xcdd6f4, false), // text
-        Token::Parameter => (0xeba0ac, true),                 // maroon
-        Token::Operator => (0x89dceb, false),                 // sky
-        Token::Punctuation => (0x9399b2, false),              // overlay2
-        Token::Attribute | Token::Label => (0xf9e2af, false), // yellow
-        Token::Namespace => (0xfab387, true),                 // peach
+// ---- Catppuccin (https://catppuccin.com) ----
+
+pub fn catppuccin_latte() -> Theme {
+    Theme {
+        name: "Catppuccin Latte",
+        mode: ThemeMode::Light,
+        base: 0xeff1f5,
+        mantle: 0xe6e9ef,
+        crust: 0xdce0e8,
+        surface0: 0xccd0da,
+        text: 0x4c4f69,
+        subtext: 0x6c6f85,
+        overlay0: 0x9ca0b0,
+        green: 0x40a02b,
+        red: 0xd20f39,
+        blue: 0x1e66f5,
+        mauve: 0x8839ef,
+        peach: 0xfe640b,
+        yellow: 0xdf8e1d,
+        lavender: 0x7287fd,
+        maroon: 0xe64553,
+        sky: 0x04a5e5,
+        overlay2: 0x6c6f85,
     }
 }
 
-fn latte_syntax(token: Token) -> (u32, bool) {
-    match token {
-        Token::Keyword => (0x8839ef, false),                  // mauve
-        Token::Function => (0x1e66f5, false),                 // blue
-        Token::Type => (0xdf8e1d, false),                     // yellow
-        Token::String => (0x40a02b, false),                   // green
-        Token::Number | Token::Constant => (0xfe640b, false), // peach
-        Token::Comment => (0x9ca0b0, true),                   // overlay0
-        Token::Property => (0x7287fd, false),                 // lavender
-        Token::Variable | Token::Embedded => (0x4c4f69, false), // text
-        Token::Parameter => (0xe64553, true),                 // maroon
-        Token::Operator => (0x04a5e5, false),                 // sky
-        Token::Punctuation => (0x6c6f85, false),              // subtext
-        Token::Attribute | Token::Label => (0xdf8e1d, false), // yellow
-        Token::Namespace => (0xfe640b, true),                 // peach
+pub fn catppuccin_frappe() -> Theme {
+    Theme {
+        name: "Catppuccin Frappé",
+        mode: ThemeMode::Dark,
+        base: 0x303446,
+        mantle: 0x292c3c,
+        crust: 0x232634,
+        surface0: 0x414559,
+        text: 0xc6d0f5,
+        subtext: 0xa5adce,
+        overlay0: 0x737994,
+        green: 0xa6d189,
+        red: 0xe78284,
+        blue: 0x8caaee,
+        mauve: 0xca9ee6,
+        peach: 0xef9f76,
+        yellow: 0xe5c890,
+        lavender: 0xbabbf1,
+        maroon: 0xea999c,
+        sky: 0x99d1db,
+        overlay2: 0x949cbb,
     }
 }
 
-fn tokyo_syntax(token: Token) -> (u32, bool) {
-    match token {
-        Token::Keyword => (0xbb9af7, false),                  // mauve/purple
-        Token::Function => (0x7aa2f7, false),                 // blue
-        Token::Type => (0xe0af68, false),                     // yellow
-        Token::String => (0x9ece6a, false),                   // green
-        Token::Number | Token::Constant => (0xff9e64, false), // peach/orange
-        Token::Comment => (0x565f89, true),                   // overlay0
-        Token::Property => (0x7dcfff, false),                 // lavender/cyan
-        Token::Variable | Token::Embedded => (0xc0caf5, false), // text
-        Token::Parameter => (0xf7768e, true),                 // maroon/red
-        Token::Operator => (0x89ddff, false),                 // sky
-        Token::Punctuation => (0xa9b1d6, false),              // subtext
-        Token::Attribute | Token::Label => (0xe0af68, false), // yellow
-        Token::Namespace => (0xff9e64, true),                 // peach
+pub fn catppuccin_macchiato() -> Theme {
+    Theme {
+        name: "Catppuccin Macchiato",
+        mode: ThemeMode::Dark,
+        base: 0x24273a,
+        mantle: 0x1e2030,
+        crust: 0x181926,
+        surface0: 0x363a4f,
+        text: 0xcad3f5,
+        subtext: 0xa5adcb,
+        overlay0: 0x6e738d,
+        green: 0xa6da95,
+        red: 0xed8796,
+        blue: 0x8aadf4,
+        mauve: 0xc6a0f6,
+        peach: 0xf5a97f,
+        yellow: 0xeed49f,
+        lavender: 0xb7bdf8,
+        maroon: 0xee99a0,
+        sky: 0x91d7e3,
+        overlay2: 0x939ab7,
     }
 }
 
@@ -172,29 +199,89 @@ pub fn catppuccin_mocha() -> Theme {
         blue: 0x89b4fa,
         mauve: 0xcba6f7,
         peach: 0xfab387,
-        syntax: mocha_syntax,
+        yellow: 0xf9e2af,
+        lavender: 0xb4befe,
+        maroon: 0xeba0ac,
+        sky: 0x89dceb,
+        overlay2: 0x9399b2,
     }
 }
 
-pub fn catppuccin_latte() -> Theme {
+// ---- GitHub (Primer, https://primer.style) ----
+
+pub fn github_light() -> Theme {
     Theme {
-        name: "Catppuccin Latte",
+        name: "GitHub Light",
         mode: ThemeMode::Light,
-        base: 0xeff1f5,
-        mantle: 0xe6e9ef,
-        crust: 0xdce0e8,
-        surface0: 0xccd0da,
-        text: 0x4c4f69,
-        subtext: 0x6c6f85,
-        overlay0: 0x9ca0b0,
-        green: 0x40a02b,
-        red: 0xd20f39,
-        blue: 0x1e66f5,
-        mauve: 0x8839ef,
-        peach: 0xfe640b,
-        syntax: latte_syntax,
+        base: 0xffffff,
+        mantle: 0xf6f8fa,
+        crust: 0xeaeef2,
+        surface0: 0xd0d7de,
+        text: 0x1f2328,
+        subtext: 0x656d76,
+        overlay0: 0x6e7781,
+        green: 0x1a7f37,
+        red: 0xcf222e,
+        blue: 0x0969da,
+        mauve: 0xcf222e, // keyword: GitHub red
+        peach: 0xbc4c00,
+        yellow: 0x953800,
+        lavender: 0x0550ae,
+        maroon: 0x953800,
+        sky: 0x0550ae,
+        overlay2: 0x656d76,
     }
 }
+
+pub fn github_dark() -> Theme {
+    Theme {
+        name: "GitHub Dark",
+        mode: ThemeMode::Dark,
+        base: 0x0d1117,
+        mantle: 0x161b22,
+        crust: 0x010409,
+        surface0: 0x30363d,
+        text: 0xe6edf3,
+        subtext: 0x7d8590,
+        overlay0: 0x6e7681,
+        green: 0x3fb950,
+        red: 0xf85149,
+        blue: 0x58a6ff,
+        mauve: 0xff7b72, // keyword: GitHub coral
+        peach: 0xffa657,
+        yellow: 0xf0883e,
+        lavender: 0x79c0ff,
+        maroon: 0xffa657,
+        sky: 0x79c0ff,
+        overlay2: 0x7d8590,
+    }
+}
+
+pub fn github_dark_dimmed() -> Theme {
+    Theme {
+        name: "GitHub Dark Dimmed",
+        mode: ThemeMode::Dark,
+        base: 0x22272e,
+        mantle: 0x2d333b,
+        crust: 0x1c2128,
+        surface0: 0x373e47,
+        text: 0xadbac7,
+        subtext: 0x768390,
+        overlay0: 0x636e7b,
+        green: 0x6bc46d,
+        red: 0xf47067,
+        blue: 0x539bf5,
+        mauve: 0xf47067,
+        peach: 0xf69d50,
+        yellow: 0xdaaa3f,
+        lavender: 0x6cb6ff,
+        maroon: 0xf69d50,
+        sky: 0x6cb6ff,
+        overlay2: 0x768390,
+    }
+}
+
+// ---- Tokyo Night (https://github.com/folke/tokyonight.nvim) ----
 
 pub fn tokyo_night() -> Theme {
     Theme {
@@ -212,18 +299,171 @@ pub fn tokyo_night() -> Theme {
         blue: 0x7aa2f7,
         mauve: 0xbb9af7,
         peach: 0xff9e64,
-        syntax: tokyo_syntax,
+        yellow: 0xe0af68,
+        lavender: 0x7dcfff,
+        maroon: 0xf7768e,
+        sky: 0x89ddff,
+        overlay2: 0xa9b1d6,
     }
 }
 
-pub fn all_names() -> &'static [&'static str] {
-    &["Catppuccin Mocha", "Catppuccin Latte", "Tokyo Night"]
+pub fn tokyo_night_storm() -> Theme {
+    Theme {
+        name: "Tokyo Night Storm",
+        mode: ThemeMode::Dark,
+        base: 0x24283b,
+        mantle: 0x1f2335,
+        crust: 0x1b1e2e,
+        surface0: 0x2f334d,
+        text: 0xc0caf5,
+        subtext: 0xa9b1d6,
+        overlay0: 0x565f89,
+        green: 0x9ece6a,
+        red: 0xf7768e,
+        blue: 0x7aa2f7,
+        mauve: 0xbb9af7,
+        peach: 0xff9e64,
+        yellow: 0xe0af68,
+        lavender: 0x7dcfff,
+        maroon: 0xf7768e,
+        sky: 0x89ddff,
+        overlay2: 0xa9b1d6,
+    }
 }
 
+pub fn tokyo_night_moon() -> Theme {
+    Theme {
+        name: "Tokyo Night Moon",
+        mode: ThemeMode::Dark,
+        base: 0x222436,
+        mantle: 0x1e2030,
+        crust: 0x191a2a,
+        surface0: 0x2f334d,
+        text: 0xc8d3f5,
+        subtext: 0xa9b8e8,
+        overlay0: 0x636da6,
+        green: 0xc3e88d,
+        red: 0xff757f,
+        blue: 0x82aaff,
+        mauve: 0xc099ff,
+        peach: 0xff966c,
+        yellow: 0xffc777,
+        lavender: 0x86e1fc,
+        maroon: 0xff757f,
+        sky: 0x86e1fc,
+        overlay2: 0x828bb8,
+    }
+}
+
+pub fn tokyo_night_light() -> Theme {
+    Theme {
+        name: "Tokyo Night Light",
+        mode: ThemeMode::Light,
+        base: 0xe1e2e7,
+        mantle: 0xd6d8df,
+        crust: 0xc9ccd6,
+        surface0: 0xc8cede,
+        text: 0x3760bf,
+        subtext: 0x6172b0,
+        overlay0: 0x848cb5,
+        green: 0x587539,
+        red: 0xf52a65,
+        blue: 0x2e7de9,
+        mauve: 0x9854f1,
+        peach: 0xb15c00,
+        yellow: 0x8c6c3e,
+        lavender: 0x7847bd,
+        maroon: 0xf52a65,
+        sky: 0x007197,
+        overlay2: 0x848cb5,
+    }
+}
+
+// ---- Solarized (https://ethanschoonover.com/solarized) ----
+
+pub fn solarized_light() -> Theme {
+    Theme {
+        name: "Solarized Light",
+        mode: ThemeMode::Light,
+        base: 0xfdf6e3,   // base3
+        mantle: 0xeee8d5, // base2
+        crust: 0xe3dcc6,
+        surface0: 0xcfc8b0,
+        text: 0x657b83,     // base00
+        subtext: 0x586e75,  // base01
+        overlay0: 0x93a1a1, // base1 (comments)
+        green: 0x859900,
+        red: 0xdc322f,
+        blue: 0x268bd2,
+        mauve: 0x6c71c4, // violet (keyword)
+        peach: 0xcb4b16, // orange
+        yellow: 0xb58900,
+        lavender: 0x6c71c4,
+        maroon: 0xcb4b16,
+        sky: 0x2aa198, // cyan
+        overlay2: 0x93a1a1,
+    }
+}
+
+pub fn solarized_dark() -> Theme {
+    Theme {
+        name: "Solarized Dark",
+        mode: ThemeMode::Dark,
+        base: 0x002b36,   // base03
+        mantle: 0x073642, // base02
+        crust: 0x00212b,
+        surface0: 0x073642,
+        text: 0x839496,     // base0
+        subtext: 0x93a1a1,  // base1
+        overlay0: 0x586e75, // base01 (comments)
+        green: 0x859900,
+        red: 0xdc322f,
+        blue: 0x268bd2,
+        mauve: 0x6c71c4,
+        peach: 0xcb4b16,
+        yellow: 0xb58900,
+        lavender: 0x6c71c4,
+        maroon: 0xcb4b16,
+        sky: 0x2aa198,
+        overlay2: 0x586e75,
+    }
+}
+
+/// Built-in theme names, in picker display order (grouped by family).
+pub fn all_names() -> &'static [&'static str] {
+    &[
+        "Catppuccin Latte",
+        "Catppuccin Frappé",
+        "Catppuccin Macchiato",
+        "Catppuccin Mocha",
+        "GitHub Light",
+        "GitHub Dark",
+        "GitHub Dark Dimmed",
+        "Tokyo Night",
+        "Tokyo Night Storm",
+        "Tokyo Night Moon",
+        "Tokyo Night Light",
+        "Solarized Light",
+        "Solarized Dark",
+    ]
+}
+
+/// Resolve a stored theme name to its palette; unknown names fall back to the
+/// default (Catppuccin Mocha).
 pub fn by_name(name: &str) -> Theme {
     match name {
         "Catppuccin Latte" => catppuccin_latte(),
+        "Catppuccin Frappé" => catppuccin_frappe(),
+        "Catppuccin Macchiato" => catppuccin_macchiato(),
+        "GitHub Light" => github_light(),
+        "GitHub Dark" => github_dark(),
+        "GitHub Dark Dimmed" => github_dark_dimmed(),
         "Tokyo Night" => tokyo_night(),
+        "Tokyo Night Storm" => tokyo_night_storm(),
+        "Tokyo Night Moon" => tokyo_night_moon(),
+        "Tokyo Night Light" => tokyo_night_light(),
+        "Solarized Light" => solarized_light(),
+        "Solarized Dark" => solarized_dark(),
         _ => catppuccin_mocha(),
     }
 }
@@ -297,11 +537,26 @@ pub fn apply_ui_theme(theme: &Theme, cx: &mut App) {
     t.window_border = surface0;
 }
 
-/// Syntax highlight for one tree-sitter token, per the active theme. Variable
-/// and Embedded map to the plain text color (syntax spans for them are not
-/// emitted, so this is belt-and-braces).
+/// Syntax highlight for one tree-sitter token, per the given theme. The
+/// token→color mapping is shared across all themes; each theme supplies the
+/// colors via its palette fields. Variable and Embedded map to the plain text
+/// color (syntax spans for them are not emitted, so this is belt-and-braces).
 pub fn token_style(theme: &Theme, token: Token) -> HighlightStyle {
-    let (color, italic) = (theme.syntax)(token);
+    let (color, italic) = match token {
+        Token::Keyword => (theme.mauve, false),
+        Token::Function => (theme.blue, false),
+        Token::Type => (theme.yellow, false),
+        Token::String => (theme.green, false),
+        Token::Number | Token::Constant => (theme.peach, false),
+        Token::Comment => (theme.overlay0, true),
+        Token::Property => (theme.lavender, false),
+        Token::Variable | Token::Embedded => (theme.text, false),
+        Token::Parameter => (theme.maroon, true),
+        Token::Operator => (theme.sky, false),
+        Token::Punctuation => (theme.overlay2, false),
+        Token::Attribute | Token::Label => (theme.yellow, false),
+        Token::Namespace => (theme.peach, true),
+    };
     HighlightStyle {
         color: Some(rgb(color).into()),
         font_style: italic.then_some(FontStyle::Italic),
@@ -347,9 +602,10 @@ mod tests {
 
     #[test]
     fn by_name_resolves_builtins() {
-        assert_eq!(by_name("Catppuccin Mocha").name, "Catppuccin Mocha");
-        assert_eq!(by_name("Catppuccin Latte").name, "Catppuccin Latte");
-        assert_eq!(by_name("Tokyo Night").name, "Tokyo Night");
+        // Every advertised name resolves to a theme carrying that same name.
+        for &name in all_names() {
+            assert_eq!(by_name(name).name, name, "by_name({name:?}) mismatch");
+        }
     }
 
     #[test]
@@ -363,24 +619,58 @@ mod tests {
         assert_eq!(t.base, 0x1e1e2e);
         assert_eq!(t.text, 0xcdd6f4);
         assert_eq!(t.blue, 0x89b4fa);
-        // syntax: keyword is mauve + not italic; comment is overlay0 + italic.
-        assert_eq!((t.syntax)(Token::Keyword), (0xcba6f7, false));
-        assert_eq!((t.syntax)(Token::Comment), (0x6c7086, true));
+        // Shared mapping must reproduce the old hardcoded Mocha syntax: keyword
+        // is mauve + not italic; comment is overlay0 + italic.
+        let kw = token_style(&t, Token::Keyword);
+        assert_eq!(kw.color, Some(rgb(0xcba6f7).into()));
+        assert_eq!(kw.font_style, None);
+        let comment = token_style(&t, Token::Comment);
+        assert_eq!(comment.color, Some(rgb(0x6c7086).into()));
+        assert_eq!(comment.font_style, Some(FontStyle::Italic));
     }
 
     #[test]
     fn all_names_lists_every_builtin() {
         let names = all_names();
-        assert!(names.contains(&"Catppuccin Mocha"));
-        assert!(names.contains(&"Catppuccin Latte"));
-        assert!(names.contains(&"Tokyo Night"));
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 13);
+        for expected in [
+            "Catppuccin Mocha",
+            "Catppuccin Latte",
+            "Catppuccin Frappé",
+            "Catppuccin Macchiato",
+            "GitHub Light",
+            "GitHub Dark",
+            "GitHub Dark Dimmed",
+            "Tokyo Night",
+            "Tokyo Night Storm",
+            "Tokyo Night Moon",
+            "Tokyo Night Light",
+            "Solarized Light",
+            "Solarized Dark",
+        ] {
+            assert!(names.contains(&expected), "missing {expected:?}");
+        }
     }
 
     #[test]
-    fn latte_is_light_mode() {
-        assert!(matches!(catppuccin_latte().mode, ThemeMode::Light));
+    fn theme_modes_are_correct() {
         assert!(matches!(catppuccin_mocha().mode, ThemeMode::Dark));
+        assert!(matches!(catppuccin_latte().mode, ThemeMode::Light));
+        assert!(matches!(github_light().mode, ThemeMode::Light));
+        assert!(matches!(github_dark().mode, ThemeMode::Dark));
+        assert!(matches!(tokyo_night_light().mode, ThemeMode::Light));
+        assert!(matches!(solarized_dark().mode, ThemeMode::Dark));
+        assert!(matches!(solarized_light().mode, ThemeMode::Light));
+    }
+
+    #[test]
+    fn muted_bg_differs_from_muted_foreground() {
+        // muted = surface0, muted_foreground = overlay0 (see apply_ui_theme).
+        // If they were equal, muted text would be invisible.
+        for &name in all_names() {
+            let t = by_name(name);
+            assert_ne!(t.surface0, t.overlay0, "{name}: surface0 == overlay0");
+        }
     }
 
     #[test]
