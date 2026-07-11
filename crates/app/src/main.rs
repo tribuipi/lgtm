@@ -24,8 +24,9 @@ use gpui_component::{
     input::{Escape as InputEscape, Input, InputEvent, InputState},
     kbd::Kbd,
     scroll::Scrollbar,
+    select::{SearchableVec, SelectEvent, SelectState},
     tag::Tag,
-    Disableable as _, IconName, Root, Sizable as _, TitleBar,
+    Disableable as _, IconName, IndexPath, Root, Sizable as _, TitleBar,
 };
 use std::ops::Range;
 use std::path::Path;
@@ -43,7 +44,7 @@ actions!(
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
         PaletteDown, PaletteBack, ClearSelection, CopySelection, FocusTreeFilter, ToggleMinimap,
-        ToggleComments, ToggleChat, SubmitReview, OpenSettings
+        ToggleComments, ToggleChat, SubmitReview, OpenSettings, CloseSettings
     ]
 );
 
@@ -111,6 +112,7 @@ fn main() {
                 KeyBinding::new("cmd-k", OpenPalette, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("escape", CloseSettings, Some("Settings")),
                 // Palette navigation. The `Palette > Input` variants are bound
                 // after gpui_component::init, so at the input's dispatch depth
                 // they take precedence over the Input's own up/down (which a
@@ -6004,18 +6006,118 @@ impl Render for ReviewApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                // Second cmd-, toggles the modal closed without mutating any
+                // setting.
                 if this.settings.is_some() {
                     this.settings = None;
                     window.focus(&this.focus_handle);
-                } else {
-                    let font_filter =
-                        cx.new(|cx| InputState::new(window, cx).placeholder("type to filter…"));
-                    font_filter.update(cx, |state, cx| state.focus(window, cx));
-                    this.settings = Some(settings_ui::SettingsUi {
-                        font_filter,
-                        focus: settings_ui::SettingsField::Theme,
-                    });
+                    cx.notify();
+                    return;
                 }
+                let s = cx.global::<settings::Settings>().clone();
+
+                // Theme dropdown, preselected to the active theme.
+                let theme_names: Vec<SharedString> =
+                    theme::all_names().iter().map(|n| SharedString::from(*n)).collect();
+                // Match on the canonically-resolved name (by_name falls back
+                // to the default theme for unknown names), so the dropdown
+                // preselects the theme actually in effect.
+                let active_theme = theme::by_name(&s.theme_name).name;
+                let theme_ix = theme_names
+                    .iter()
+                    .position(|n| n.as_ref() == active_theme)
+                    .map(IndexPath::new);
+                let theme_select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(theme_names), theme_ix, window, cx)
+                        .searchable(true)
+                });
+
+                // Font dropdowns, preselected to the active UI / code fonts.
+                let font_names: Vec<SharedString> =
+                    settings_ui::all_font_names(cx).into_iter().map(SharedString::from).collect();
+                let ui_ix = s
+                    .ui_font
+                    .as_ref()
+                    .and_then(|f| font_names.iter().position(|n| n.as_ref() == f))
+                    .map(IndexPath::new);
+                let code_ix = font_names
+                    .iter()
+                    .position(|n| n.as_ref() == s.code_font)
+                    .map(IndexPath::new);
+                let ui_font_select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(font_names.clone()), ui_ix, window, cx)
+                        .searchable(true)
+                });
+                let code_font_select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(font_names), code_ix, window, cx)
+                        .searchable(true)
+                });
+
+                // Each confirmed selection updates the global setting and
+                // applies + persists it live.
+                let subs = vec![
+                    cx.subscribe_in(
+                        &theme_select,
+                        window,
+                        |this,
+                         _,
+                         ev: &SelectEvent<SearchableVec<SharedString>>,
+                         window,
+                         cx| {
+                            if let SelectEvent::Confirm(Some(name)) = ev {
+                                let name = name.to_string();
+                                cx.update_global::<settings::Settings, _>(|s, _| {
+                                    s.theme_name = name.clone()
+                                });
+                                settings_ui::apply_and_save(this, window, cx);
+                            }
+                        },
+                    ),
+                    cx.subscribe_in(
+                        &ui_font_select,
+                        window,
+                        |this,
+                         _,
+                         ev: &SelectEvent<SearchableVec<SharedString>>,
+                         window,
+                         cx| {
+                            if let SelectEvent::Confirm(Some(name)) = ev {
+                                let name = name.to_string();
+                                cx.update_global::<settings::Settings, _>(|s, _| {
+                                    s.ui_font = Some(name.clone())
+                                });
+                                settings_ui::apply_and_save(this, window, cx);
+                            }
+                        },
+                    ),
+                    cx.subscribe_in(
+                        &code_font_select,
+                        window,
+                        |this,
+                         _,
+                         ev: &SelectEvent<SearchableVec<SharedString>>,
+                         window,
+                         cx| {
+                            if let SelectEvent::Confirm(Some(name)) = ev {
+                                let name = name.to_string();
+                                cx.update_global::<settings::Settings, _>(|s, _| {
+                                    s.code_font = name.clone()
+                                });
+                                settings_ui::apply_and_save(this, window, cx);
+                            }
+                        },
+                    ),
+                ];
+
+                let focus_handle = cx.focus_handle();
+                window.focus(&focus_handle);
+                this.settings = Some(settings_ui::SettingsUi {
+                    focus_handle,
+                    theme_select,
+                    ui_font_select,
+                    code_font_select,
+                    _subs: subs,
+                });
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| {
