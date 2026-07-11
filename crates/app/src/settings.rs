@@ -61,7 +61,10 @@ impl Settings {
         let font_size = field("font_size")
             .and_then(|v| v.try_into::<f32>().ok())
             .unwrap_or(defaults.font_size);
-        Self { theme_name, ui_font, code_font, font_size }
+        let mut settings = Self { theme_name, ui_font, code_font, font_size };
+        // A hand-edited out-of-range size is clamped, not honored verbatim.
+        settings.set_font_size(settings.font_size);
+        settings
     }
 
     pub fn load() -> Self {
@@ -171,5 +174,11 @@ mod tests {
         assert_eq!(s.font_size, 32.0);
         s.set_font_size(1.0);
         assert_eq!(s.font_size, 8.0);
+    }
+
+    #[test]
+    fn out_of_range_font_size_in_config_is_clamped_on_load() {
+        assert_eq!(Settings::from_toml_str("font_size = 100.0\n").font_size, 32.0);
+        assert_eq!(Settings::from_toml_str("font_size = 2.0\n").font_size, 8.0);
     }
 }
