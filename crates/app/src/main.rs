@@ -44,7 +44,8 @@ actions!(
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
         PaletteDown, PaletteBack, ClearSelection, CopySelection, FocusTreeFilter, ToggleMinimap,
-        ToggleComments, ToggleChat, SubmitReview, OpenSettings, CloseSettings
+        ToggleComments, ToggleChat, SubmitReview, OpenSettings, CloseSettings,
+        SettingsThemePrev, SettingsThemeNext, SettingsThemeConfirm
     ]
 );
 
@@ -113,6 +114,12 @@ fn main() {
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("escape", CloseSettings, Some("Settings")),
+                // Theme-list keyboard navigation, active while the settings
+                // card holds focus (a focused font dropdown consumes these in
+                // its own "Select" context first).
+                KeyBinding::new("up", SettingsThemePrev, Some("Settings")),
+                KeyBinding::new("down", SettingsThemeNext, Some("Settings")),
+                KeyBinding::new("enter", SettingsThemeConfirm, Some("Settings")),
                 // Palette navigation. The `Palette > Input` variants are bound
                 // after gpui_component::init, so at the input's dispatch depth
                 // they take precedence over the Input's own up/down (which a
@@ -6080,9 +6087,16 @@ impl Render for ReviewApp {
 
                 let focus_handle = cx.focus_handle();
                 window.focus(&focus_handle);
+                // Keyboard cursor starts on the active (resolved) theme.
+                let active_theme = theme::by_name(&s.theme_name).name;
+                let theme_cursor = theme::all_names()
+                    .iter()
+                    .position(|n| *n == active_theme)
+                    .unwrap_or(0);
                 this.settings = Some(settings_ui::SettingsUi {
                     focus_handle,
                     baseline_theme: s.theme_name.clone(),
+                    theme_cursor,
                     ui_font_select,
                     code_font_select,
                     _subs: subs,

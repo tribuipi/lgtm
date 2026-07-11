@@ -33,6 +33,10 @@ pub struct SettingsUi {
     /// leaving the list — or closing the modal — reverts to this baseline. So
     /// browsing themes is a true preview that only sticks when clicked.
     pub baseline_theme: String,
+    /// Index into `theme::all_names()` of the row the keyboard cursor / mouse
+    /// hover is on (and thus the theme being previewed). Kept in sync by both
+    /// arrow-key nav and hover so the highlight is single-sourced.
+    pub theme_cursor: usize,
     pub ui_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub code_font_select: Entity<SelectState<SearchableVec<SharedString>>>,
     /// Holds the two font `SelectEvent` subscriptions alive for the modal's
@@ -98,6 +102,33 @@ fn preview_theme(app: &mut ReviewApp, name: &str, cx: &mut Context<ReviewApp>) {
     theme::apply_ui_theme(&theme::by_name(&name), cx);
     app.char_width = None;
     cx.notify();
+}
+
+/// Move the theme cursor to `ix` (clamped) and preview that theme live.
+/// Shared by arrow-key nav and hover so both drive the same highlight.
+pub(crate) fn preview_theme_at(app: &mut ReviewApp, ix: usize, cx: &mut Context<ReviewApp>) {
+    let names = theme::all_names();
+    let ix = ix.min(names.len().saturating_sub(1));
+    if let Some(ui) = &mut app.settings {
+        ui.theme_cursor = ix;
+    }
+    preview_theme(app, names[ix], cx);
+}
+
+/// Commit `name` as the chosen theme: update the global + baseline and persist
+/// (via `apply_and_save`). Shared by row click and Enter-to-select.
+pub(crate) fn commit_theme(
+    app: &mut ReviewApp,
+    name: &str,
+    window: &mut Window,
+    cx: &mut Context<ReviewApp>,
+) {
+    let name = name.to_string();
+    cx.update_global::<settings::Settings, _>(|s, _| s.theme_name = name.clone());
+    if let Some(ui) = &mut app.settings {
+        ui.baseline_theme = name.clone();
+    }
+    apply_and_save(app, window, cx);
 }
 
 /// One labeled form field: a `subtext`-colored label stacked above its
@@ -186,10 +217,9 @@ impl ReviewApp {
         // theme live (no save); clicking commits + persists it; leaving the
         // list reverts to the committed baseline (see `preview_theme`).
         let baseline = ui.baseline_theme.clone();
-        // Highlight by the *resolved* active theme name so the highlight
-        // follows the theme actually applied (by_name falls back to the
-        // default for an unknown/stale stored name).
-        let current = theme::by_name(&s.theme_name).name;
+        // The cursor (arrow-key nav or hover) is the single source of the
+        // highlighted/previewed row.
+        let cursor = ui.theme_cursor;
         let mut theme_list = div()
             .id("theme-list")
             .flex()
@@ -199,21 +229,27 @@ impl ReviewApp {
             .on_hover(cx.listener({
                 let baseline = baseline.clone();
                 move |this, hovered: &bool, _window, cx| {
-                    // Pointer left the whole list → drop the preview.
+                    // Pointer left the whole list → snap the cursor back to the
+                    // committed theme and drop the preview.
                     if !*hovered {
-                        preview_theme(this, &baseline, cx);
+                        let ix = theme::all_names()
+                            .iter()
+                            .position(|n| *n == baseline)
+                            .unwrap_or(0);
+                        preview_theme_at(this, ix, cx);
                     }
                 }
             }));
-        for name in theme::all_names() {
-            // `active` (row highlight) follows the *previewed* theme; `selected`
-            // (right-side tick) marks the *committed* one, so while you hover to
-            // preview others the tick still shows what's actually chosen.
-            let active = *name == current;
-            let selected = *name == baseline;
+        for (i, name) in theme::all_names().iter().enumerate() {
+            let name: &'static str = name;
+            // `active` (row highlight) follows the cursor (previewed theme);
+            // `selected` (right-side tick) marks the *committed* one, so while
+            // you browse others the tick still shows what's actually chosen.
+            let active = i == cursor;
+            let selected = name == baseline.as_str();
             theme_list = theme_list.child(
                 div()
-                    .id(*name)
+                    .id(name)
                     .flex()
                     .items_center()
                     .justify_between()
@@ -230,19 +266,13 @@ impl ReviewApp {
                     })
                     .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                         if *hovered {
-                            preview_theme(this, name, cx);
+                            preview_theme_at(this, i, cx);
                         }
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.update_global::<settings::Settings, _>(|s, _| {
-                            s.theme_name = name.to_string()
-                        });
-                        if let Some(ui) = &mut this.settings {
-                            ui.baseline_theme = name.to_string();
-                        }
-                        apply_and_save(this, window, cx);
+                        commit_theme(this, name, window, cx);
                     }))
-                    .child(SharedString::from(*name))
+                    .child(SharedString::from(name))
                     .when(selected, |row| {
                         row.child(
                             gpui_component::Icon::new(gpui_component::IconName::Check)
@@ -297,6 +327,28 @@ impl ReviewApp {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_action(cx.listener(move |this, _: &crate::CloseSettings, window, cx| {
                         close(this, window, cx);
+                    }))
+                    // Arrow keys move the theme cursor (previewing live);
+                    // Enter commits the theme under the cursor.
+                    .on_action(cx.listener(|this, _: &crate::SettingsThemePrev, _window, cx| {
+                        let cur = this.settings.as_ref().map(|ui| ui.theme_cursor);
+                        if let Some(cur) = cur {
+                            preview_theme_at(this, cur.saturating_sub(1), cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &crate::SettingsThemeNext, _window, cx| {
+                        let cur = this.settings.as_ref().map(|ui| ui.theme_cursor);
+                        if let Some(cur) = cur {
+                            preview_theme_at(this, cur + 1, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &crate::SettingsThemeConfirm, window, cx| {
+                        let ix = this.settings.as_ref().map(|ui| ui.theme_cursor);
+                        if let Some(ix) = ix {
+                            let names = theme::all_names();
+                            let name = names[ix.min(names.len().saturating_sub(1))];
+                            commit_theme(this, name, window, cx);
+                        }
                     }))
                     .rounded_lg()
                     .border_1()
