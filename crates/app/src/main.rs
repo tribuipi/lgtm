@@ -6095,7 +6095,10 @@ impl Render for ReviewApp {
                     .unwrap_or(0);
                 this.settings = Some(settings_ui::SettingsUi {
                     focus_handle,
-                    baseline_theme: s.theme_name.clone(),
+                    // Canonical resolved name (not the raw stored string), so
+                    // the committed-theme tick always lands on a real row and a
+                    // stale/unknown stored name can't be re-persisted on revert.
+                    baseline_theme: active_theme.to_string(),
                     theme_cursor,
                     ui_font_select,
                     code_font_select,
