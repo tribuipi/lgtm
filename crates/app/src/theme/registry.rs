@@ -6,24 +6,77 @@
 use crate::theme::embedded_mocha;
 use crate::theme::model::{Appearance, Theme};
 use crate::theme::{resolver, zed};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Directories scanned for external Zed themes, in precedence order (later
-/// entries override earlier ones during discovery). App dir first, then Zed's
-/// user themes dir. Missing dirs are simply skipped by callers.
+/// entries override earlier ones during discovery). The app's own themes dir
+/// comes first, then Zed extension-provided themes, then Zed's hand-placed user
+/// themes dir last (so a theme a user dropped into `zed/themes` wins over an
+/// extension shipping the same name). Missing dirs are simply skipped by
+/// callers. Duplicates are removed while preserving this precedence order.
 pub fn theme_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(config) = dirs::config_dir() {
         dirs.push(config.join("lgtm").join("themes"));
+    }
+    // Themes shipped by installed Zed extensions live one level deeper, under
+    // `<extensions/installed>/<ext>/themes`. Enumerated dynamically.
+    for installed in zed_extension_installed_dirs() {
+        dirs.extend(extension_theme_dirs_in(&installed));
+    }
+    // Zed user themes. `config_dir()/zed/themes` covers the XDG case; on macOS
+    // `config_dir()` is `~/Library/Application Support` but Zed actually stores
+    // user themes under `~/.config/zed/themes` there too, so add that as well.
+    if let Some(config) = dirs::config_dir() {
         dirs.push(config.join("zed").join("themes"));
     }
-    // On macOS `config_dir()` is `~/Library/Application Support`, but Zed stores
-    // user themes under `~/.config/zed/themes` there too; add it so the
-    // opportunistic scan finds real Zed installs.
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".config").join("zed").join("themes"));
     }
+    // De-duplicate (e.g. on Linux `config_dir()` IS `~/.config`) while keeping
+    // the first occurrence, so precedence order is preserved.
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|p| seen.insert(p.clone()));
     dirs
+}
+
+/// Candidate `extensions/installed` roots where Zed unpacks installed
+/// extensions, across platforms. Zed uses a capitalized `Zed` data dir on
+/// macOS and a lowercase `zed` dir under XDG data on Linux; probe all and let
+/// callers skip the ones that don't exist.
+fn zed_extension_installed_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(data) = dirs::data_dir() {
+        roots.push(data.join("Zed").join("extensions").join("installed"));
+        roots.push(data.join("zed").join("extensions").join("installed"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(
+            home.join(".local")
+                .join("share")
+                .join("zed")
+                .join("extensions")
+                .join("installed"),
+        );
+    }
+    roots
+}
+
+/// Given a Zed `extensions/installed` directory, return the `themes` subdir of
+/// every installed extension that has one. Returns empty (no error) when
+/// `installed` is absent or unreadable.
+fn extension_theme_dirs_in(installed: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(installed) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let themes = entry.path().join("themes");
+        if themes.is_dir() {
+            out.push(themes);
+        }
+    }
+    out
 }
 
 /// Scan `dirs` for a variant named `name`, parsing files lazily and returning
@@ -210,5 +263,43 @@ mod tests {
         let names = reg.names();
         assert!(names.contains(&"Catppuccin Mocha".to_string()));
         assert!(names.contains(&"Z".to_string()));
+    }
+
+    #[test]
+    fn registry_names_preserve_insertion_order_across_override() {
+        // Seeded with "Catppuccin Mocha"; then A, then Z. Re-inserting Mocha
+        // (an override) must NOT move it to the end — display order is stable.
+        let mut reg = ThemeRegistry::seeded(embedded_mocha());
+        let mut a = embedded_mocha();
+        a.name = "Aaa".into();
+        reg.insert(a);
+        let mut z = embedded_mocha();
+        z.name = "Zzz".into();
+        reg.insert(z);
+        reg.insert(embedded_mocha()); // override of the first entry
+        assert_eq!(
+            reg.names(),
+            vec![
+                "Catppuccin Mocha".to_string(),
+                "Aaa".to_string(),
+                "Zzz".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_theme_dirs_finds_installed_theme_folders() {
+        // Mimic `<installed>/<ext>/themes`: one extension ships themes, another
+        // does not; a missing root yields empty without panicking.
+        let root = std::env::temp_dir().join(format!("lgtm-ext-test-{}", std::process::id()));
+        let ext_themes = root.join("some-theme-ext").join("themes");
+        std::fs::create_dir_all(&ext_themes).unwrap();
+        std::fs::create_dir_all(root.join("no-themes-ext")).unwrap();
+
+        let found = extension_theme_dirs_in(&root);
+        assert_eq!(found, vec![ext_themes]);
+        assert!(extension_theme_dirs_in(&root.join("does-not-exist")).is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

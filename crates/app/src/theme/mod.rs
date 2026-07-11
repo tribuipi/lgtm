@@ -15,6 +15,8 @@ pub use embedded::embedded_mocha;
 pub use model::Theme;
 pub use registry::{discover, ThemeRegistry};
 
+use model::with_alpha;
+
 mod embedded;
 #[cfg(test)]
 mod golden;
@@ -170,10 +172,6 @@ pub fn token_style(theme: &Theme, token: Token) -> HighlightStyle {
         font_weight: s.bold.then_some(FontWeight::BOLD),
         ..Default::default()
     }
-}
-
-fn with_alpha(c: Rgba, a: f32) -> Rgba {
-    Rgba { a, ..c }
 }
 
 /// Dimming layer behind the command palette / modals.

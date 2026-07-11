@@ -4,7 +4,7 @@
 //! is documented inline; the anchor roles (background/editor_bg/text) bottom
 //! out at appearance-keyed constants so no field is ever left unset.
 
-use crate::theme::model::{Appearance, SyntaxStyle, Theme};
+use crate::theme::model::{with_alpha, Appearance, SyntaxStyle, Theme};
 use crate::theme::zed::RawStyle;
 use gpui::Rgba;
 use std::collections::HashMap;
@@ -48,10 +48,6 @@ fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
         b: a.b + (b.b - a.b) * t,
         a: a.a,
     }
-}
-
-fn with_alpha(c: Rgba, a: f32) -> Rgba {
-    Rgba { a, ..c }
 }
 
 /// Appearance-keyed anchors for themes that omit even the basics.

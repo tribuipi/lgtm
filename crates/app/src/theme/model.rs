@@ -38,6 +38,12 @@ pub struct SyntaxStyle {
     pub bold: bool,
 }
 
+/// Return `c` with its alpha replaced by `a`. Shared by the resolver (deriving
+/// low-alpha status/selection tints) and the diff-tint accessors in `mod`.
+pub(crate) fn with_alpha(c: Rgba, a: f32) -> Rgba {
+    Rgba { a, ..c }
+}
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub name: String,
