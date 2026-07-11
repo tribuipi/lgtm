@@ -16,6 +16,8 @@ pub use model::{Appearance, SyntaxStyle, Theme};
 pub use registry::{discover, theme_dirs, ThemeRegistry};
 
 mod embedded;
+#[cfg(test)]
+mod golden;
 mod model;
 mod registry;
 mod resolver;

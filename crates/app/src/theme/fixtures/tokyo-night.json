@@ -1,0 +1,32 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Tokyo Night Test",
+  "author": "fixture",
+  "themes": [
+    {
+      "name": "Tokyo Night Test",
+      "appearance": "dark",
+      "style": {
+        "background": "#1a1b26",
+        "editor.background": "#16161e",
+        "surface.background": "#1f2335",
+        "element.background": "#292e42",
+        "border": "#292e42",
+        "text": "#c0caf5",
+        "text.muted": "#a9b1d6",
+        "text.placeholder": "#565f89",
+        "text.accent": "#7aa2f7",
+        "created": "#9ece6a",
+        "deleted": "#f7768e",
+        "modified": "#e0af68",
+        "players": [{ "cursor": "#c0caf5", "selection": "#7aa2f733" }],
+        "syntax": {
+          "keyword": { "color": "#bb9af7" },
+          "function": { "color": "#7aa2f7" },
+          "comment": { "color": "#565f89", "font_style": "italic" },
+          "variable.parameter": { "color": "#e0af68", "font_style": "italic" }
+        }
+      }
+    }
+  ]
+}
