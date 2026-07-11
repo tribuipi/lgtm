@@ -1,3 +1,4 @@
+mod settings;
 mod theme;
 
 use anyhow::anyhow;
@@ -27,10 +28,6 @@ use gpui_component::{
 };
 use std::ops::Range;
 use std::path::Path;
-
-const MONO: &str = "Menlo";
-const ROW_HEIGHT: f32 = 22.0;
-const TEXT_SIZE: f32 = 13.0;
 
 /// Gutter widths in px, matching render_row's fixed-width children: unified is
 /// two 44px line-number columns + a 28px marker; each split cell is one of
@@ -79,7 +76,9 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            theme::apply_ui_theme(cx);
+            let settings = settings::Settings::load();
+            theme::apply_ui_theme(&theme::by_name(&settings.theme_name), cx);
+            cx.set_global(settings);
             cx.bind_keys([
                 KeyBinding::new("]", NextFile, Some("ReviewApp")),
                 KeyBinding::new("[", PrevFile, Some("ReviewApp")),
@@ -1026,18 +1025,21 @@ fn build_rows(
 }
 
 /// Per-kind row tint, word-highlight tint, gutter marker, and marker color.
-fn kind_style(kind: LineKind) -> (Option<gpui::Rgba>, Option<gpui::Rgba>, &'static str, gpui::Rgba) {
+fn kind_style(
+    kind: LineKind,
+    theme: &theme::Theme,
+) -> (Option<gpui::Rgba>, Option<gpui::Rgba>, &'static str, gpui::Rgba) {
     match kind {
         LineKind::Context => (None, None, "", theme::overlay0()),
         LineKind::Added => (
-            Some(theme::added_row_bg()),
-            Some(theme::added_word_bg()),
+            Some(theme::added_row_bg(theme)),
+            Some(theme::added_word_bg(theme)),
             "+",
             theme::green(),
         ),
         LineKind::Removed => (
-            Some(theme::removed_row_bg()),
-            Some(theme::removed_word_bg()),
+            Some(theme::removed_row_bg(theme)),
+            Some(theme::removed_word_bg(theme)),
             "−",
             theme::red(),
         ),
@@ -1056,6 +1058,7 @@ fn merge_highlights(
     intra: &[Range<usize>],
     word_bg: Option<gpui::Rgba>,
     selection: Option<Range<usize>>,
+    theme: &theme::Theme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut bounds = Vec::with_capacity(2 * (syntax.len() + intra.len() + 1));
     for (range, _) in syntax {
@@ -1091,12 +1094,12 @@ fn merge_highlights(
         if token.is_none() && !in_intra && !in_sel {
             continue;
         }
-        let mut style = token.map(theme::token_style).unwrap_or_default();
+        let mut style = token.map(|t| theme::token_style(theme, t)).unwrap_or_default();
         if in_intra {
             style.background_color = word_bg.map(Into::into);
         }
         if in_sel {
-            style.background_color = Some(theme::selection_bg().into());
+            style.background_color = Some(theme::selection_bg(theme).into());
         }
         match out.last_mut() {
             // Coalesce adjacent identically-styled segments.
@@ -1117,8 +1120,9 @@ fn line_content(
     intra: &[Range<usize>],
     word_bg: Option<gpui::Rgba>,
     selection: Option<Range<usize>>,
+    theme: &theme::Theme,
 ) -> gpui::AnyElement {
-    let highlights = merge_highlights(syntax, intra, word_bg, selection);
+    let highlights = merge_highlights(syntax, intra, word_bg, selection, theme);
     if highlights.is_empty() {
         div().child(text.clone()).into_any_element()
     } else {
@@ -1130,9 +1134,9 @@ fn line_content(
 
 /// Shared shape of every comment row: indented card with a mantle background
 /// and a blue left accent, spanning full width in both view modes.
-fn comment_row(inner: gpui::AnyElement) -> gpui::AnyElement {
+fn comment_row(inner: gpui::AnyElement, row_height: Pixels) -> gpui::AnyElement {
     div()
-        .h(px(ROW_HEIGHT))
+        .h(row_height)
         .w_full()
         .flex()
         .child(div().w(px(72.)).flex_shrink_0())
@@ -1163,8 +1167,9 @@ fn render_row(
     row: &Row,
     selection: Option<(SelSide, Range<usize>)>,
     entity: &gpui::Entity<ReviewApp>,
+    theme: &theme::Theme,
+    row_height: Pixels,
 ) -> gpui::AnyElement {
-    let row_height = px(ROW_HEIGHT);
     match row {
         Row::CommentHeader {
             author,
@@ -1194,6 +1199,7 @@ fn render_row(
                             .child(when.clone()),
                     )
                     .into_any_element(),
+                row_height,
             )
         }
         Row::CommentBody { line } => comment_row(
@@ -1202,6 +1208,7 @@ fn render_row(
                 .text_color(theme::subtext())
                 .child(line.clone())
                 .into_any_element(),
+            row_height,
         ),
         Row::CommentActions {
             root_id,
@@ -1233,6 +1240,7 @@ fn render_row(
                         });
                     })
                     .into_any_element(),
+                row_height,
             )
         }
         Row::Spacer => div().h(row_height).into_any_element(),
@@ -1362,7 +1370,7 @@ fn render_row(
             intra,
             syntax,
         } => {
-            let (row_bg, word_bg, marker, marker_color) = kind_style(*kind);
+            let (row_bg, word_bg, marker, marker_color) = kind_style(*kind, theme);
             let number = |no: Option<u32>| {
                 div()
                     .w(px(44.))
@@ -1396,6 +1404,7 @@ fn render_row(
                         intra,
                         word_bg,
                         selection.map(|(_, range)| range),
+                        theme,
                     )),
                 )
                 .into_any_element()
@@ -1415,9 +1424,9 @@ fn render_row(
                     .flex()
                     .items_center();
                 let Some(cell) = cell else {
-                    return base.bg(theme::void_cell_bg());
+                    return base.bg(theme::void_cell_bg(theme));
                 };
-                let (row_bg, word_bg, marker, marker_color) = kind_style(cell.kind);
+                let (row_bg, word_bg, marker, marker_color) = kind_style(cell.kind, theme);
                 let mut side = base;
                 if let Some(bg) = row_bg {
                     side = side.bg(bg);
@@ -1446,6 +1455,7 @@ fn render_row(
                     &cell.intra,
                     word_bg,
                     sel,
+                    theme,
                 )))
             };
             // w_full is load-bearing: without a definite row width the row
@@ -2054,12 +2064,12 @@ impl ItemData {
     /// (visibility toggle, comment refetch), keeping the viewport anchored:
     /// the first visible non-comment row stays put even though comment rows
     /// above it appeared or disappeared.
-    fn rebuild_rows_anchored(&mut self) {
+    fn rebuild_rows_anchored(&mut self, row_height: f32) {
         let offset = self.scroll.0.borrow().base_handle.offset();
         let top_px = f32::from(-offset.y).max(0.);
         let top_row =
-            ((top_px / ROW_HEIGHT).floor() as usize).min(self.rows.len().saturating_sub(1));
-        let frac = top_px - top_row as f32 * ROW_HEIGHT;
+            ((top_px / row_height).floor() as usize).min(self.rows.len().saturating_sub(1));
+        let frac = top_px - top_row as f32 * row_height;
         let count_noncomment =
             |rows: &[Row]| rows.iter().filter(|row| !is_comment_row(row)).count();
         let top_base = count_noncomment(&self.rows[..top_row]);
@@ -2076,7 +2086,7 @@ impl ItemData {
         let new_top = nth_noncomment_row(&self.rows, top_base);
         self.scroll.0.borrow().base_handle.set_offset(point(
             offset.x,
-            px(-(new_top as f32 * ROW_HEIGHT + frac)),
+            px(-(new_top as f32 * row_height + frac)),
         ));
     }
 
@@ -3107,7 +3117,7 @@ struct ReviewApp {
     chat_visible: bool,
     /// A minimap scrub drag is in progress (mouse went down on the minimap).
     minimap_scrub: bool,
-    /// Advance width of one monospace cell at (MONO, TEXT_SIZE), measured once.
+    /// Advance width of one monospace cell at (code_font, font_size), measured once.
     char_width: Option<Pixels>,
     /// Diff row + split half under the pointer where a hover "+" (new
     /// comment) affordance shows; None when the pointer isn't on a
@@ -3256,13 +3266,17 @@ impl ReviewApp {
 
     /// Advance width of one monospace cell, measured once via the text system
     /// (Menlo is monospace, so 'm' stands in for every glyph).
-    fn char_width(&mut self, window: &Window) -> Pixels {
+    fn char_width(&mut self, window: &Window, cx: &App) -> Pixels {
+        let (code_font, size) = {
+            let s = cx.global::<settings::Settings>();
+            (s.code_font.clone(), s.font_size)
+        };
         *self.char_width.get_or_insert_with(|| {
             let text_system = window.text_system();
-            let font_id = text_system.resolve_font(&font(MONO));
+            let font_id = text_system.resolve_font(&font(SharedString::from(code_font)));
             text_system
-                .em_advance(font_id, px(TEXT_SIZE))
-                .unwrap_or(px(TEXT_SIZE * 0.6))
+                .em_advance(font_id, px(size))
+                .unwrap_or(px(size * 0.6))
         })
     }
 
@@ -3275,6 +3289,7 @@ impl ReviewApp {
         &self,
         position: Point<Pixels>,
         char_width: Pixels,
+        row_height: f32,
         locked: Option<SelSide>,
     ) -> Option<(SelSide, RowCol)> {
         let data = self.active_data()?;
@@ -3287,7 +3302,7 @@ impl ReviewApp {
         };
         // offset.y is negative when scrolled down.
         let y = f32::from(position.y - bounds.top() - offset.y);
-        let row = ((y / ROW_HEIGHT).floor().max(0.) as usize).min(data.rows.len() - 1);
+        let row = ((y / row_height).floor().max(0.) as usize).min(data.rows.len() - 1);
         let rel_x = f32::from(position.x - bounds.left());
         let (side, text_x) = match data.mode {
             // offset.x is negative when scrolled right (unified mode only;
@@ -3470,6 +3485,7 @@ impl ReviewApp {
     /// viewport stable: when the expansion happens above the visible top row,
     /// the scroll offset shifts down by exactly the inserted height.
     fn expand_gap(&mut self, file_ix: usize, gap_ix: usize, cx: &mut Context<Self>) {
+        let row_height = cx.global::<settings::Settings>().row_height();
         let Some(data) = self.active_data_mut() else {
             return;
         };
@@ -3502,11 +3518,11 @@ impl ReviewApp {
             let scroll = data.scroll.0.borrow();
             let offset = scroll.base_handle.offset();
             // offset.y is negative when scrolled down.
-            let top_row = (f32::from(-offset.y) / ROW_HEIGHT).floor() as usize;
+            let top_row = (f32::from(-offset.y) / row_height).floor() as usize;
             if gap_row < top_row {
                 scroll.base_handle.set_offset(point(
                     offset.x,
-                    offset.y - px(inserted as f32 * ROW_HEIGHT),
+                    offset.y - px(inserted as f32 * row_height),
                 ));
             }
         }
@@ -3958,8 +3974,9 @@ impl ReviewApp {
         let px_per_row = slot_h / group as f32;
         let y = f32::from(position.y - bounds.top());
         let row = (y / px_per_row).clamp(0., (total - 1) as f32);
-        let target = row * ROW_HEIGHT - (pane_h - ROW_HEIGHT) / 2.;
-        let max_scroll = (total as f32 * ROW_HEIGHT - pane_h).max(0.);
+        let row_height = cx.global::<settings::Settings>().row_height();
+        let target = row * row_height - (pane_h - row_height) / 2.;
+        let max_scroll = (total as f32 * row_height - pane_h).max(0.);
         data.scroll
             .0
             .borrow()
@@ -3978,7 +3995,7 @@ impl ReviewApp {
             return; // Local item: no comment affordances.
         }
         data.comments_visible = !data.comments_visible;
-        data.rebuild_rows_anchored();
+        data.rebuild_rows_anchored(cx.global::<settings::Settings>().row_height());
         cx.notify();
     }
 
@@ -3989,11 +4006,13 @@ impl ReviewApp {
         &mut self,
         position: Point<Pixels>,
         window: &Window,
+        cx: &App,
     ) -> Option<(usize, SelSide)> {
         if self.palette.is_some() {
             return None;
         }
-        let char_width = self.char_width(window);
+        let char_width = self.char_width(window, cx);
+        let row_height = cx.global::<settings::Settings>().row_height();
         let item = self.active_item()?;
         let Source::Pr(_) = item.source else {
             return None;
@@ -4014,7 +4033,7 @@ impl ReviewApp {
         if !bounds.contains(&position) {
             return None;
         }
-        let (side, hit) = self.pane_hit(position, char_width, None)?;
+        let (side, hit) = self.pane_hit(position, char_width, row_height, None)?;
         let data = self.active_data()?;
         comment_anchor(&data.rows, hit.row, side).map(|_| (hit.row, side))
     }
@@ -4178,7 +4197,7 @@ impl ReviewApp {
                 match fetched {
                     Ok(comments) => {
                         data.comments = Some(group_comments(comments));
-                        data.rebuild_rows_anchored();
+                        data.rebuild_rows_anchored(cx.global::<settings::Settings>().row_height());
                     }
                     Err(err) => {
                         item.refresh_error =
@@ -4795,6 +4814,7 @@ impl ReviewApp {
                 }
             }
         }
+        let row_height = px(cx.global::<settings::Settings>().row_height());
         let messages = div()
             .id("chat-messages")
             .flex_1()
@@ -4803,12 +4823,12 @@ impl ReviewApp {
             .track_scroll(&chat.scroll)
             // Stick-to-bottom the way editors do it: scrolling up unsticks,
             // scrolling back to (near) the bottom re-sticks.
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
                 let Some(data) = this.active_data_mut() else {
                     return;
                 };
                 let chat = &mut data.chat;
-                let dy = f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y);
+                let dy = f32::from(event.delta.pixel_delta(row_height).y);
                 if dy > 0. {
                     chat.stick_to_bottom = false;
                 } else {
@@ -4892,8 +4912,9 @@ impl ReviewApp {
             (state.base_handle.bounds(), state.base_handle.offset())
         };
         // Pane-relative y of the hovered row; skip when scrolled out of view.
-        let y = row_ix as f32 * ROW_HEIGHT + f32::from(offset.y);
-        if y < 0. || y + ROW_HEIGHT > f32::from(bounds.size.height) {
+        let row_height = cx.global::<settings::Settings>().row_height();
+        let y = row_ix as f32 * row_height + f32::from(offset.y);
+        if y < 0. || y + row_height > f32::from(bounds.size.height) {
             return None;
         }
         let x = match (data.mode, side) {
@@ -4907,7 +4928,7 @@ impl ReviewApp {
             div()
                 .absolute()
                 .left(px(x))
-                .top(px(y + (ROW_HEIGHT - 16.) / 2.))
+                .top(px(y + (row_height - 16.) / 2.))
                 .w(px(16.))
                 .h(px(16.))
                 .rounded_sm()
@@ -4952,9 +4973,10 @@ impl ReviewApp {
             let state = data.scroll.0.borrow();
             (state.base_handle.bounds(), state.base_handle.offset())
         };
+        let row_height = cx.global::<settings::Settings>().row_height();
         let pane_h = f32::from(bounds.size.height);
-        let row_y = composer.row_ix as f32 * ROW_HEIGHT + f32::from(offset.y);
-        let y = f32::from(bounds.top()) + (row_y + ROW_HEIGHT).clamp(8., (pane_h - 250.).max(8.));
+        let row_y = composer.row_ix as f32 * row_height + f32::from(offset.y);
+        let y = f32::from(bounds.top()) + (row_y + row_height).clamp(8., (pane_h - 250.).max(8.));
         let x = (f32::from(bounds.left()) + 72.)
             .min((f32::from(bounds.right()) - 528.).max(8.));
         let action = if composer.reply_to.is_some() {
@@ -5092,7 +5114,9 @@ impl ReviewApp {
             .flex_col()
             .items_center()
             .pt(px(120.))
-            .bg(theme::palette_backdrop())
+            .bg(theme::palette_backdrop(&theme::by_name(
+                &cx.global::<settings::Settings>().theme_name,
+            )))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5251,9 +5275,10 @@ impl ReviewApp {
                         // Viewport indicator — the only per-frame math.
                         let offset_y =
                             f32::from(-data.scroll.0.borrow().base_handle.offset().y);
+                        let row_height = cx.global::<settings::Settings>().row_height();
                         let px_per_row = layout.slot_h / layout.group as f32;
-                        let top_row = offset_y / ROW_HEIGHT;
-                        let visible = (pane_h / ROW_HEIGHT).min(total as f32 - top_row);
+                        let top_row = offset_y / row_height;
+                        let visible = (pane_h / row_height).min(total as f32 - top_row);
                         let vy = top_row * px_per_row;
                         let vh = (visible * px_per_row).max(3.);
                         window.paint_quad(
@@ -5442,13 +5467,14 @@ impl ReviewApp {
             // Follow the diff: highlight the file whose header row is at (or
             // scrolled past) the top of the viewport. A pending scroll_to_item
             // (from ]/[ or a tree click) hasn't reached the offset yet, so it
-            // takes precedence; otherwise the same offset/ROW_HEIGHT math the
+            // takes precedence; otherwise the same offset/row_height math the
             // selection hit test uses.
             let scroll = data.scroll.0.borrow();
+            let row_height = cx.global::<settings::Settings>().row_height();
             let top_row = match &scroll.deferred_scroll_to_item {
                 Some(deferred) => deferred.item_index,
                 None => {
-                    (f32::from(-scroll.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize
+                    (f32::from(-scroll.base_handle.offset().y) / row_height).max(0.) as usize
                 }
             };
             drop(scroll);
@@ -5683,7 +5709,9 @@ impl ReviewApp {
             .flex_col()
             .items_center()
             .pt(px(120.))
-            .bg(theme::palette_backdrop())
+            .bg(theme::palette_backdrop(&theme::by_name(
+                &cx.global::<settings::Settings>().theme_name,
+            )))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5784,6 +5812,7 @@ impl ReviewApp {
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let row_height_px = px(cx.global::<settings::Settings>().row_height());
         let pane: gpui::AnyElement = match self.active_item() {
             None => centered_message("⌘T to open a PR or path".into(), theme::overlay0()),
             Some(item) => match &item.state {
@@ -5805,9 +5834,11 @@ impl Render for ReviewApp {
                     .size_full()
                     .relative()
                     .flex()
-                    .font_family(MONO)
-                    .text_size(px(TEXT_SIZE))
-                    .line_height(px(ROW_HEIGHT))
+                    .font_family(SharedString::from(
+                        cx.global::<settings::Settings>().code_font.clone(),
+                    ))
+                    .text_size(px(cx.global::<settings::Settings>().font_size))
+                    .line_height(row_height_px)
                     // Selection mouse listeners live on the diff pane only.
                     // While the palette is open its occluding backdrop keeps
                     // this hitbox from being hovered, so none of these fire;
@@ -5821,8 +5852,10 @@ impl Render for ReviewApp {
                                 return;
                             }
                             window.focus(&this.focus_handle);
-                            let char_width = this.char_width(window);
-                            this.drag_anchor = this.pane_hit(event.position, char_width, None);
+                            let char_width = this.char_width(window, cx);
+                            let row_height = cx.global::<settings::Settings>().row_height();
+                            this.drag_anchor =
+                                this.pane_hit(event.position, char_width, row_height, None);
                             // A plain click clears; a selection only appears
                             // once the drag covers ≥ 1 char.
                             if let Some(data) = this.active_data_mut() {
@@ -5846,8 +5879,10 @@ impl Render for ReviewApp {
                         let Some((side, anchor)) = this.drag_anchor else {
                             return;
                         };
-                        let char_width = this.char_width(window);
-                        let Some((_, head)) = this.pane_hit(event.position, char_width, Some(side))
+                        let char_width = this.char_width(window, cx);
+                        let row_height = cx.global::<settings::Settings>().row_height();
+                        let Some((_, head)) =
+                            this.pane_hit(event.position, char_width, row_height, Some(side))
                         else {
                             return;
                         };
@@ -5878,6 +5913,9 @@ impl Render for ReviewApp {
                     .child(
                         uniform_list("diff", data.rows.len(), move |range, _window, cx| {
                             let this = entity.read(cx);
+                            let active_theme =
+                                theme::by_name(&cx.global::<settings::Settings>().theme_name);
+                            let row_height = px(cx.global::<settings::Settings>().row_height());
                             match this.active_data() {
                                 Some(data) => {
                                     let sel = data.selection;
@@ -5889,7 +5927,10 @@ impl Render for ReviewApp {
                                                     .filter(|range| !range.is_empty())
                                                     .map(|range| (sel.side, range))
                                             });
-                                            render_row(ix, row, row_sel, &entity)
+                                            render_row(
+                                                ix, row, row_sel, &entity, &active_theme,
+                                                row_height,
+                                            )
                                         })
                                         .collect()
                                 }
@@ -5978,7 +6019,7 @@ impl Render for ReviewApp {
                 if event.dragging() {
                     return;
                 }
-                let hover = this.hover_target(event.position, window);
+                let hover = this.hover_target(event.position, window, cx);
                 if this.hover_plus != hover {
                     this.hover_plus = hover;
                     cx.notify();
@@ -6390,13 +6431,17 @@ mod tests {
 
     use syntax::Token;
 
+    fn mocha_theme() -> theme::Theme {
+        theme::catppuccin_mocha()
+    }
+
     fn style(token: Token) -> HighlightStyle {
-        theme::token_style(token)
+        theme::token_style(&mocha_theme(), token)
     }
 
     fn style_bg(token: Option<Token>) -> HighlightStyle {
         let mut style = token.map(style).unwrap_or_default();
-        style.background_color = Some(theme::added_word_bg().into());
+        style.background_color = Some(theme::added_word_bg(&mocha_theme()).into());
         style
     }
 
@@ -6404,26 +6449,26 @@ mod tests {
     fn merge_syntax_only() {
         let syntax = [(0..2, Token::Keyword), (3..7, Token::Function)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..2, style(Token::Keyword)), (3..7, style(Token::Function))]
         );
     }
 
     #[test]
     fn merge_intra_only() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         assert_eq!(
-            merge_highlights(&[], &[2..5], bg, None),
+            merge_highlights(&[], &[2..5], bg, None, &mocha_theme()),
             vec![(2..5, style_bg(None))]
         );
     }
 
     #[test]
     fn merge_partial_overlap() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let syntax = [(0..6, Token::String)];
         assert_eq!(
-            merge_highlights(&syntax, &[4..8], bg, None),
+            merge_highlights(&syntax, &[4..8], bg, None, &mocha_theme()),
             vec![
                 (0..4, style(Token::String)),
                 (4..6, style_bg(Some(Token::String))),
@@ -6434,10 +6479,10 @@ mod tests {
 
     #[test]
     fn merge_intra_spanning_multiple_tokens() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let syntax = [(0..3, Token::Keyword), (5..8, Token::Number)];
         assert_eq!(
-            merge_highlights(&syntax, &[1..7], bg, None),
+            merge_highlights(&syntax, &[1..7], bg, None, &mocha_theme()),
             vec![
                 (0..1, style(Token::Keyword)),
                 (1..3, style_bg(Some(Token::Keyword))),
@@ -6454,17 +6499,17 @@ mod tests {
         // stay split exactly at the boundary.
         let syntax = [(0..2, Token::Keyword), (2..4, Token::Keyword)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..4, style(Token::Keyword))]
         );
         let syntax = [(0..2, Token::Keyword), (2..4, Token::Type)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..2, style(Token::Keyword)), (2..4, style(Token::Type))]
         );
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         assert_eq!(
-            merge_highlights(&[], &[0..2, 2..4], bg, None),
+            merge_highlights(&[], &[0..2, 2..4], bg, None, &mocha_theme()),
             vec![(0..4, style_bg(None))]
         );
     }
@@ -7555,21 +7600,21 @@ mod tests {
 
     #[test]
     fn merge_selection_wins_over_intra() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let sel_style = |token: Option<Token>| {
             let mut style = token.map(style).unwrap_or_default();
-            style.background_color = Some(theme::selection_bg().into());
+            style.background_color = Some(theme::selection_bg(&mocha_theme()).into());
             style
         };
         // Intra 2..6, selection 4..8: the overlap 4..6 paints selection bg.
         assert_eq!(
-            merge_highlights(&[], &[2..6], bg, Some(4..8)),
+            merge_highlights(&[], &[2..6], bg, Some(4..8), &mocha_theme()),
             vec![(2..4, style_bg(None)), (4..8, sel_style(None))]
         );
         // Selection over a syntax token keeps the token foreground.
         let syntax = [(0..4, Token::Keyword)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, Some(2..6)),
+            merge_highlights(&syntax, &[], None, Some(2..6), &mocha_theme()),
             vec![
                 (0..2, style(Token::Keyword)),
                 (2..4, sel_style(Some(Token::Keyword))),
