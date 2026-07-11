@@ -26,7 +26,7 @@ use gpui_component::{
     scroll::Scrollbar,
     select::{SearchableVec, SelectEvent, SelectState},
     tag::Tag,
-    Disableable as _, IconName, IndexPath, Root, Sizable as _, TitleBar,
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Root, Sizable as _, TitleBar,
 };
 use std::ops::Range;
 use std::path::Path;
@@ -4942,6 +4942,13 @@ impl ReviewApp {
             }
             _ => 2.,
         };
+        // Source the button colors from the theme's primary role — the same
+        // one gpui-component's real `.primary()` buttons use — rather than the
+        // raw `blue()` accent, so the "+" reads as an actual primary button.
+        let (btn_bg, btn_fg) = {
+            let t = cx.theme();
+            (t.primary, t.primary_foreground)
+        };
         let entity = cx.entity();
         Some(
             div()
@@ -4951,11 +4958,11 @@ impl ReviewApp {
                 .w(px(16.))
                 .h(px(16.))
                 .rounded_sm()
-                .bg(theme::blue())
+                .bg(btn_bg)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(gpui::white())
+                .text_color(btn_fg)
                 .text_size(cx.global::<settings::Settings>().chrome(13.))
                 .cursor_pointer()
                 .child(SharedString::from("+"))

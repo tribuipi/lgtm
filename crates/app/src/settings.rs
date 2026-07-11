@@ -100,8 +100,13 @@ impl Settings {
         px(base * self.scale())
     }
 
+    /// Rounded to a whole logical pixel: uniform_list lays each row out through
+    /// taffy (which rounds heights to whole pixels), and hit-testing plus the
+    /// hover "+" position rows with this value directly. A fractional height
+    /// diverges from what taffy paints and the drift accumulates down the list,
+    /// landing the "+" on the wrong line. Rounding keeps both sides in step.
     pub fn row_height(&self) -> f32 {
-        self.font_size * ROW_RATIO
+        (self.font_size * ROW_RATIO).round()
     }
 
     pub fn set_font_size(&mut self, v: f32) {
@@ -154,6 +159,22 @@ mod tests {
         s.font_size = 26.0; // 2x baseline
         assert_eq!(s.scale(), 2.0);
         assert_eq!(s.row_height(), 44.0);
+    }
+
+    #[test]
+    fn row_height_is_a_whole_pixel_at_every_size() {
+        // uniform_list lays each row out through taffy, which rounds heights to
+        // whole logical pixels; hit-testing and the hover "+" position rows with
+        // this value directly. A fractional row_height diverges from what taffy
+        // paints and the error accumulates down the list, landing the "+" on the
+        // wrong line. Keep it integral so both sides agree. (14 -> 23.69 -> 24.)
+        for size in 8..=32 {
+            let s = Settings { font_size: size as f32, ..Settings::default() };
+            let h = s.row_height();
+            assert_eq!(h.fract(), 0.0, "row_height({size}) = {h} is not a whole pixel");
+        }
+        let s = Settings { font_size: 14.0, ..Settings::default() };
+        assert_eq!(s.row_height(), 24.0);
     }
 
     #[test]
