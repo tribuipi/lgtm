@@ -3222,6 +3222,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "serde",
+ "serde_json",
  "syntax",
  "toml 0.8.23",
 ]
