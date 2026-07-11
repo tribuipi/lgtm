@@ -389,30 +389,26 @@ impl ReviewApp {
                             .placeholder("UI font"),
                     ))
                     .child(field("Code font", code_font_block))
+                    .child(field("Font size", size_row))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(size_row)
-                            .child(
-                                Button::new("settings-reset")
-                                    .label("Reset to defaults")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.update_global::<settings::Settings, _>(|s, _| {
-                                            *s = settings::Settings::default();
-                                        });
-                                        // Reset changes the theme too, so move
-                                        // the preview baseline with it.
-                                        let default_theme = settings::Settings::default().theme_name;
-                                        if let Some(ui) = &mut this.settings {
-                                            ui.baseline_theme = default_theme;
-                                        }
-                                        apply_and_save(this, window, cx);
-                                    })),
-                            ),
+                        div().flex().justify_end().child(
+                            Button::new("settings-reset")
+                                .label("Reset to defaults")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    cx.update_global::<settings::Settings, _>(|s, _| {
+                                        *s = settings::Settings::default();
+                                    });
+                                    // Reset changes the theme too, so move the
+                                    // preview baseline with it.
+                                    let default_theme = settings::Settings::default().theme_name;
+                                    if let Some(ui) = &mut this.settings {
+                                        ui.baseline_theme = default_theme;
+                                    }
+                                    apply_and_save(this, window, cx);
+                                })),
+                        ),
                     ),
             )
             .into_any_element()
