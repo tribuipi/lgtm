@@ -5835,6 +5835,7 @@ impl ReviewApp {
             .child(hint(&["cmd-j"], "chat"))
             .child(hint(&["r"], "refresh"))
             .child(hint(&["cmd-enter"], "review"))
+            .child(hint(&["cmd-,"], "settings"))
     }
 }
 
