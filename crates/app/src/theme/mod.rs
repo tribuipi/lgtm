@@ -15,6 +15,8 @@ use gpui_component::{Theme as UiTheme, ThemeMode};
 use std::cell::RefCell;
 use syntax::Token;
 
+mod model;
+mod resolver;
 mod zed;
 
 // Invariant: any change to `settings.theme_name` MUST be followed by

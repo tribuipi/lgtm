@@ -10,7 +10,7 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 /// Semantic token classes, deliberately coarse: capture names from each
 /// grammar's bundled highlight query are folded onto these via longest-prefix
 /// matching (tree-sitter-highlight's own resolution rule).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Token {
     Keyword,
     Function,
