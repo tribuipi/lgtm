@@ -1169,6 +1169,7 @@ fn render_row(
     entity: &gpui::Entity<ReviewApp>,
     theme: &theme::Theme,
     row_height: Pixels,
+    meta_text_size: Pixels,
 ) -> gpui::AnyElement {
     match row {
         Row::CommentHeader {
@@ -1195,7 +1196,7 @@ fn render_row(
                     .child(
                         div()
                             .text_color(theme::overlay0())
-                            .text_size(px(11.))
+                            .text_size(meta_text_size)
                             .child(when.clone()),
                     )
                     .into_any_element(),
@@ -1319,7 +1320,7 @@ fn render_row(
                 }
                 header = header.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(meta_text_size)
                         .text_color(theme::overlay0())
                         .child(SharedString::from(note)),
                 );
@@ -1890,6 +1891,7 @@ fn render_tree_row(
     current: bool,
     data: &ItemData,
     entity: &gpui::Entity<ReviewApp>,
+    stats_text_size: Pixels,
 ) -> gpui::AnyElement {
     let stats = |file: &FileDiff| {
         div()
@@ -1897,7 +1899,7 @@ fn render_tree_row(
             .items_center()
             .gap_1()
             .flex_shrink_0()
-            .text_size(px(10.))
+            .text_size(stats_text_size)
             .child(
                 div()
                     .text_color(Hsla::from(theme::green()).opacity(0.7))
@@ -4706,7 +4708,7 @@ impl ReviewApp {
             .bg(theme::mantle())
             .border_l_1()
             .border_color(theme::surface0())
-            .text_size(px(13.))
+            .text_size(cx.global::<settings::Settings>().chrome(13.))
             // The chat input propagates Escape when it has nothing of its
             // own to dismiss: stop a streaming run, else return to the diff.
             .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
@@ -4741,7 +4743,7 @@ impl ReviewApp {
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                     .text_color(theme::overlay0())
                     .child(SharedString::from("claude")),
             )
@@ -4784,7 +4786,7 @@ impl ReviewApp {
                     if let Some(note) = &msg.note {
                         wrap = wrap.child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(cx.global::<settings::Settings>().chrome(10.))
                                 .text_color(theme::overlay0())
                                 .truncate()
                                 .child(SharedString::from(note.clone())),
@@ -4805,7 +4807,7 @@ impl ReviewApp {
                     if let Some(cost) = msg.cost {
                         wrap = wrap.child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(cx.global::<settings::Settings>().chrome(10.))
                                 .text_color(theme::overlay0())
                                 .child(SharedString::from(format!("${cost:.4}"))),
                         );
@@ -4854,7 +4856,7 @@ impl ReviewApp {
         if let Some(hint) = sel_hint {
             input_area = input_area.child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(cx.global::<settings::Settings>().chrome(10.))
                     .text_color(theme::blue())
                     .truncate()
                     .child(SharedString::from(hint)),
@@ -4865,7 +4867,7 @@ impl ReviewApp {
         }
         input_area = input_area.child(
             div()
-                .text_size(px(10.))
+                .text_size(cx.global::<settings::Settings>().chrome(10.))
                 .text_color(theme::overlay0())
                 .child(SharedString::from(if chat.in_flight {
                     "streaming… esc to stop"
@@ -4937,7 +4939,7 @@ impl ReviewApp {
                 .items_center()
                 .justify_center()
                 .text_color(gpui::white())
-                .text_size(px(13.))
+                .text_size(cx.global::<settings::Settings>().chrome(13.))
                 .cursor_pointer()
                 .child(SharedString::from("+"))
                 .on_mouse_down(
@@ -5012,7 +5014,7 @@ impl ReviewApp {
             .flex()
             .flex_col()
             .gap_2()
-            .text_size(px(12.))
+            .text_size(cx.global::<settings::Settings>().chrome(12.))
             .child(
                 div()
                     .text_color(theme::overlay0())
@@ -5031,7 +5033,7 @@ impl ReviewApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.))
+                            .text_size(cx.global::<settings::Settings>().chrome(11.))
                             .text_color(theme::overlay0())
                             .child(SharedString::from("⌘⏎ to submit")),
                     )
@@ -5142,7 +5144,7 @@ impl ReviewApp {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_size(px(12.))
+                    .text_size(cx.global::<settings::Settings>().chrome(12.))
                     .child(
                         div()
                             .text_color(theme::overlay0())
@@ -5173,7 +5175,7 @@ impl ReviewApp {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(11.))
+                                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                                     .text_color(theme::overlay0())
                                     .child(SharedString::from("⌘⏎ to submit")),
                             )
@@ -5324,7 +5326,7 @@ impl ReviewApp {
             }
         });
         TitleBar::new()
-            .text_size(px(13.))
+            .text_size(cx.global::<settings::Settings>().chrome(13.))
             .child(content)
             .when_some(note, |bar, note| {
                 bar.child(
@@ -5356,7 +5358,7 @@ impl ReviewApp {
                     .items_center()
                     .gap_1()
                     .flex_shrink_0()
-                    .text_size(px(11.))
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                     .child(
                         div()
                             .text_color(theme::green())
@@ -5370,13 +5372,13 @@ impl ReviewApp {
                     .into_any_element(),
                 ItemState::Loading => div()
                     .flex_shrink_0()
-                    .text_size(px(11.))
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                     .text_color(theme::overlay0())
                     .child(SharedString::from("loading…"))
                     .into_any_element(),
                 ItemState::Failed(_) => div()
                     .flex_shrink_0()
-                    .text_size(px(11.))
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                     .text_color(theme::red())
                     .child(SharedString::from("failed"))
                     .into_any_element(),
@@ -5438,7 +5440,7 @@ impl ReviewApp {
                         div()
                             .pl(px(16.))
                             .truncate()
-                            .text_size(px(11.))
+                            .text_size(cx.global::<settings::Settings>().chrome(11.))
                             .text_color(theme::subtext())
                             .child(secondary),
                     )
@@ -5503,6 +5505,7 @@ impl ReviewApp {
         }
         let tree_scroll = self.active_data().map(|data| data.tree_scroll.clone());
         let entity = cx.entity();
+        let stats_text_size = cx.global::<settings::Settings>().chrome(10.);
         let tree_list: gpui::AnyElement = match tree_scroll {
             Some(scroll) if !tree_rows.is_empty() => {
                 uniform_list("file-tree", tree_rows.len(), move |range, _window, cx| {
@@ -5513,7 +5516,14 @@ impl ReviewApp {
                     range
                         .filter_map(|pos| tree_rows.get(pos).map(|row| (pos, *row)))
                         .map(|(pos, row)| {
-                            render_tree_row(row, pos, current_row == Some(pos), data, &entity)
+                            render_tree_row(
+                                row,
+                                pos,
+                                current_row == Some(pos),
+                                data,
+                                &entity,
+                                stats_text_size,
+                            )
                         })
                         .collect()
                 })
@@ -5539,7 +5549,7 @@ impl ReviewApp {
             .bg(theme::mantle())
             .border_r_1()
             .border_color(theme::surface0())
-            .text_size(px(12.))
+            .text_size(cx.global::<settings::Settings>().chrome(12.))
             .child(
                 div()
                     .p_2()
@@ -5550,7 +5560,7 @@ impl ReviewApp {
                     .when_some(self.open_error.clone(), |area, err| {
                         area.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(cx.global::<settings::Settings>().chrome(11.))
                                 .text_color(theme::red())
                                 .child(err),
                         )
@@ -5744,7 +5754,7 @@ impl ReviewApp {
                     .border_color(theme::surface0())
                     .bg(theme::mantle())
                     .shadow_lg()
-                    .text_size(px(13.))
+                    .text_size(cx.global::<settings::Settings>().chrome(13.))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -5753,7 +5763,7 @@ impl ReviewApp {
                             div()
                                 .px_3()
                                 .pt_2()
-                                .text_size(px(11.))
+                                .text_size(cx.global::<settings::Settings>().chrome(11.))
                                 .text_color(theme::overlay0())
                                 .child(header),
                         )
@@ -5770,7 +5780,7 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    fn render_footer(&self) -> impl IntoElement {
+    fn render_footer(&self, text_size: Pixels) -> impl IntoElement {
         let hint = |keys: &[&str], label: &'static str| {
             let mut hint = div().flex().items_center().gap_1();
             for key in keys {
@@ -5792,7 +5802,7 @@ impl ReviewApp {
             .bg(theme::mantle())
             .border_t_1()
             .border_color(theme::surface0())
-            .text_size(px(12.))
+            .text_size(text_size)
             .child(hint(&["]", "["], "files"))
             .child(hint(&["n", "p"], "hunks"))
             .child(hint(&["v"], "unified/split"))
@@ -5812,6 +5822,7 @@ impl ReviewApp {
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let ui_font = cx.global::<settings::Settings>().ui_font.clone();
         let row_height_px = px(cx.global::<settings::Settings>().row_height());
         let pane: gpui::AnyElement = match self.active_item() {
             None => centered_message("⌘T to open a PR or path".into(), theme::overlay0()),
@@ -5916,6 +5927,7 @@ impl Render for ReviewApp {
                             let active_theme =
                                 theme::by_name(&cx.global::<settings::Settings>().theme_name);
                             let row_height = px(cx.global::<settings::Settings>().row_height());
+                            let meta_text_size = cx.global::<settings::Settings>().chrome(11.);
                             match this.active_data() {
                                 Some(data) => {
                                     let sel = data.selection;
@@ -5929,7 +5941,7 @@ impl Render for ReviewApp {
                                             });
                                             render_row(
                                                 ix, row, row_sel, &entity, &active_theme,
-                                                row_height,
+                                                row_height, meta_text_size,
                                             )
                                         })
                                         .collect()
@@ -5966,6 +5978,7 @@ impl Render for ReviewApp {
             .flex_col()
             .bg(theme::base())
             .text_color(theme::text())
+            .when_some(ui_font, |root, f| root.font_family(SharedString::from(f)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -6115,7 +6128,7 @@ impl Render for ReviewApp {
                         main.child(self.render_chat(window, cx))
                     }),
             )
-            .child(self.render_footer())
+            .child(self.render_footer(cx.global::<settings::Settings>().chrome(12.)))
             // Root-level so the composer's input escapes the "ReviewApp" key
             // context (plain letters must stay text, like the palette input).
             .when(self.composer.is_some(), |root| {
