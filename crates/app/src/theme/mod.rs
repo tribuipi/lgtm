@@ -15,6 +15,7 @@ use gpui_component::{Theme as UiTheme, ThemeMode};
 use std::cell::RefCell;
 use syntax::Token;
 
+mod embedded;
 mod model;
 mod resolver;
 mod zed;
