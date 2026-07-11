@@ -3,51 +3,70 @@
 //! seam a future external-theme loader (e.g. Helix .toml) targets.
 //!
 //! The bare `base()`/`mantle()`/.../`peach()` accessors below predate this
-//! refactor and stay hardcoded to Catppuccin Mocha: they back the many
-//! decorative UI colors (badges, chat, titlebar, sidebar, …) that this task
-//! did not wire to the active theme. Only `apply_ui_theme`, `token_style`,
-//! and the tint helpers below are theme-aware; re-theming the rest of the
-//! app's chrome is left for a follow-up task.
+//! refactor. They now read a thread-local "active theme" cell that
+//! `apply_ui_theme` installs, so the many decorative UI colors (badges,
+//! chat, titlebar, sidebar, …) that call them follow whatever theme is
+//! currently applied. Before the first `apply_ui_theme`/`set_active_theme`
+//! call on a thread, the cell defaults to Catppuccin Mocha.
 
 use gpui::{rgb, rgba, App, FontStyle, HighlightStyle, Hsla, Rgba};
 use gpui_component::{Theme as UiTheme, ThemeMode};
+use std::cell::RefCell;
 use syntax::Token;
 
+thread_local! {
+    /// The palette the bare accessors below read from. Set by
+    /// `apply_ui_theme` (and directly in tests). Defaults to Mocha so any
+    /// read before the first apply matches today's hardcoded behavior.
+    static ACTIVE: RefCell<Theme> = RefCell::new(catppuccin_mocha());
+}
+
+/// Install `theme` as the palette the bare color accessors return. Called by
+/// `apply_ui_theme`; exposed for tests that have no `App`.
+pub(crate) fn set_active_theme(theme: &Theme) {
+    ACTIVE.with(|a| *a.borrow_mut() = theme.clone());
+}
+
+/// The palette currently backing the bare color accessors.
+fn active() -> Theme {
+    ACTIVE.with(|a| a.borrow().clone())
+}
+
 pub fn base() -> Rgba {
-    rgb(0x1e1e2e)
+    rgb(active().base)
 }
 pub fn mantle() -> Rgba {
-    rgb(0x181825)
+    rgb(active().mantle)
 }
 pub fn crust() -> Rgba {
-    rgb(0x11111b)
+    rgb(active().crust)
 }
 pub fn surface0() -> Rgba {
-    rgb(0x313244)
+    rgb(active().surface0)
 }
 pub fn text() -> Rgba {
-    rgb(0xcdd6f4)
+    rgb(active().text)
 }
 pub fn subtext() -> Rgba {
-    rgb(0xa6adc8)
+    rgb(active().subtext)
 }
 pub fn overlay0() -> Rgba {
-    rgb(0x6c7086)
+    rgb(active().overlay0)
 }
 pub fn green() -> Rgba {
-    rgb(0xa6e3a1)
+    rgb(active().green)
 }
 pub fn red() -> Rgba {
-    rgb(0xf38ba8)
+    rgb(active().red)
 }
 pub fn blue() -> Rgba {
-    rgb(0x89b4fa)
+    rgb(active().blue)
 }
 pub fn mauve() -> Rgba {
-    rgb(0xcba6f7)
+    rgb(active().mauve)
 }
 pub fn peach() -> Rgba {
-    rgb(0xfab387)
+    rgb(active().peach)
 }
 
 /// A named palette + syntax mapping. Built-ins are small literals; a future
@@ -202,6 +221,7 @@ pub fn by_name(name: &str) -> Theme {
 /// Override gpui-component's theme (dark mode, default shadcn palette) with
 /// the given `Theme`. Call after `gpui_component::init`.
 pub fn apply_ui_theme(theme: &Theme, cx: &mut App) {
+    set_active_theme(theme);
     UiTheme::change(theme.mode, None, cx);
 
     let base: Hsla = rgb(theme.base).into();
@@ -351,5 +371,23 @@ mod tests {
     fn latte_is_light_mode() {
         assert!(matches!(catppuccin_latte().mode, ThemeMode::Light));
         assert!(matches!(catppuccin_mocha().mode, ThemeMode::Dark));
+    }
+
+    #[test]
+    fn accessors_default_to_mocha_without_apply() {
+        // No set_active_theme call on this test's thread → Mocha default.
+        assert_eq!(base(), rgb(0x1e1e2e));
+        assert_eq!(text(), rgb(0xcdd6f4));
+        assert_eq!(green(), rgb(0xa6e3a1));
+    }
+
+    #[test]
+    fn accessors_follow_active_theme() {
+        set_active_theme(&catppuccin_latte());
+        assert_eq!(base(), rgb(0xeff1f5)); // latte base
+        assert_eq!(text(), rgb(0x4c4f69)); // latte text
+        set_active_theme(&tokyo_night());
+        assert_eq!(green(), rgb(0x9ece6a)); // tokyo green
+        assert_eq!(base(), rgb(0x1a1b26)); // tokyo base
     }
 }
