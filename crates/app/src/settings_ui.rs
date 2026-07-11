@@ -66,6 +66,16 @@ pub fn all_font_names(cx: &gpui::App) -> Vec<String> {
 /// done here), or the bare accessors in `theme.rs` (`ACTIVE`) will diverge
 /// from the syntax/tint colors derived inline via `by_name`.
 pub fn apply_and_save(app: &mut ReviewApp, window: &mut Window, cx: &mut Context<ReviewApp>) {
+    // A commit must persist the *committed* theme, never a transient
+    // hover-preview. Hover only sets the global for live preview (no save);
+    // theme-click/reset set `baseline_theme` before calling here (so this is
+    // a no-op for them), while font/size commits drop any active preview back
+    // to the baseline. Without this, a keyboard Tab from a hovered theme row
+    // to a font/size control (no mouse-move → no hover-revert) would save the
+    // un-clicked preview.
+    if let Some(baseline) = app.settings.as_ref().map(|ui| ui.baseline_theme.clone()) {
+        cx.update_global::<settings::Settings, _>(|s, _| s.theme_name = baseline);
+    }
     let s = cx.global::<settings::Settings>().clone();
     theme::apply_ui_theme(&theme::by_name(&s.theme_name), cx);
     app.char_width = None;
