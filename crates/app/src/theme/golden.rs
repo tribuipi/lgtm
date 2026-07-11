@@ -42,6 +42,9 @@ mod tests {
     fn tokyo_night_syntax_snapshot() {
         let t = resolve_first(TOKYO);
         assert_eq!(t.syntax(Token::Keyword).color, rgb(0xbb9af7));
+        // font_weight 700 in the fixture resolves to bold; function omits it.
+        assert!(t.syntax(Token::Keyword).bold);
+        assert!(!t.syntax(Token::Function).bold);
         assert_eq!(t.syntax(Token::Function).color, rgb(0x7aa2f7));
         assert_eq!(t.syntax(Token::Comment).color, rgb(0x565f89));
         assert!(t.syntax(Token::Comment).italic);

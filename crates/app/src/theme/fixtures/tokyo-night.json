@@ -21,7 +21,7 @@
         "modified": "#e0af68",
         "players": [{ "cursor": "#c0caf5", "selection": "#7aa2f733" }],
         "syntax": {
-          "keyword": { "color": "#bb9af7" },
+          "keyword": { "color": "#bb9af7", "font_weight": 700 },
           "function": { "color": "#7aa2f7" },
           "comment": { "color": "#565f89", "font_style": "italic" },
           "variable.parameter": { "color": "#e0af68", "font_style": "italic" }

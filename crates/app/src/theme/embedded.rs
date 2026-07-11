@@ -56,6 +56,8 @@ mod tests {
         let t = embedded_mocha();
         assert_eq!(t.syntax(Token::Keyword).color, rgb(0xcba6f7));
         assert!(!t.syntax(Token::Keyword).italic);
+        // Mocha ships all syntax weights null → keyword stays non-bold.
+        assert!(!t.syntax(Token::Keyword).bold);
         assert_eq!(t.syntax(Token::Function).color, rgb(0x89b4fa));
         assert_eq!(t.syntax(Token::Type).color, rgb(0xf9e2af));
         assert_eq!(t.syntax(Token::String).color, rgb(0xa6e3a1));

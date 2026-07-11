@@ -35,6 +35,7 @@ impl From<super::zed::RawAppearance> for Appearance {
 pub struct SyntaxStyle {
     pub color: Rgba,
     pub italic: bool,
+    pub bold: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,6 @@ impl Theme {
         self.syntax
             .get(&token)
             .copied()
-            .unwrap_or(SyntaxStyle { color: self.text, italic: false })
+            .unwrap_or(SyntaxStyle { color: self.text, italic: false, bold: false })
     }
 }

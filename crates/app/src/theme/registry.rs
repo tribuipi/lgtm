@@ -17,6 +17,12 @@ pub fn theme_dirs() -> Vec<PathBuf> {
         dirs.push(config.join("lgtm").join("themes"));
         dirs.push(config.join("zed").join("themes"));
     }
+    // On macOS `config_dir()` is `~/Library/Application Support`, but Zed stores
+    // user themes under `~/.config/zed/themes` there too; add it so the
+    // opportunistic scan finds real Zed installs.
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".config").join("zed").join("themes"));
+    }
     dirs
 }
 
@@ -94,12 +100,9 @@ impl ThemeRegistry {
         self.themes.get(name)
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.order.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
     }
 }
 

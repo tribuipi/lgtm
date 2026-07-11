@@ -6,14 +6,14 @@
 //! the applied theme. Before the first apply on a thread the cell defaults to
 //! the embedded Catppuccin Mocha.
 
-use gpui::{App, FontStyle, HighlightStyle, Hsla, Rgba};
+use gpui::{App, FontStyle, FontWeight, HighlightStyle, Hsla, Rgba};
 use gpui_component::Theme as UiTheme;
 use std::cell::RefCell;
 use syntax::Token;
 
 pub use embedded::embedded_mocha;
-pub use model::{Appearance, SyntaxStyle, Theme};
-pub use registry::{discover, theme_dirs, ThemeRegistry};
+pub use model::Theme;
+pub use registry::{discover, ThemeRegistry};
 
 mod embedded;
 #[cfg(test)]
@@ -88,9 +88,6 @@ pub fn warning() -> Rgba {
 }
 pub fn success() -> Rgba {
     active().success
-}
-pub fn info() -> Rgba {
-    active().info
 }
 
 /// Override gpui-component's widget theme with the given resolved `Theme`.
@@ -170,6 +167,7 @@ pub fn token_style(theme: &Theme, token: Token) -> HighlightStyle {
     HighlightStyle {
         color: Some(s.color.into()),
         font_style: s.italic.then_some(FontStyle::Italic),
+        font_weight: s.bold.then_some(FontWeight::BOLD),
         ..Default::default()
     }
 }
@@ -222,6 +220,7 @@ pub fn load_active(name: &str) -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::model::SyntaxStyle;
     use gpui::rgb;
     use syntax::Token;
 
@@ -248,9 +247,19 @@ mod tests {
         let kw = token_style(&t, Token::Keyword);
         assert_eq!(kw.color, Some(rgb(0xcba6f7).into()));
         assert_eq!(kw.font_style, None);
+        // Mocha ships all syntax weights null → keyword is not bold.
+        assert_eq!(kw.font_weight, None);
         let comment = token_style(&t, Token::Comment);
         assert_eq!(comment.color, Some(rgb(0x9399b2).into()));
         assert_eq!(comment.font_style, Some(FontStyle::Italic));
+
+        // A synthetic bold SyntaxStyle emits FontWeight::BOLD.
+        let mut bold = t.clone();
+        bold.syntax.insert(
+            Token::Keyword,
+            SyntaxStyle { color: rgb(0xffffff), italic: false, bold: true },
+        );
+        assert_eq!(token_style(&bold, Token::Keyword).font_weight, Some(FontWeight::BOLD));
     }
 
     #[test]

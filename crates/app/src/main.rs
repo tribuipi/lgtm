@@ -6140,9 +6140,10 @@ impl Render for ReviewApp {
                 });
                 this.settings = Some(settings_ui::SettingsUi {
                     focus_handle,
-                    // Canonical resolved name (not the raw stored string), so
-                    // the committed-theme tick always lands on a real row and a
-                    // stale/unknown stored name can't be re-persisted on revert.
+                    // Seed from the raw persisted `s.theme_name`: we preserve the
+                    // user's chosen name verbatim (even if it isn't on disk right
+                    // now) so it re-binds when the theme reappears, rather than
+                    // snapping to a canonical/resolved name.
                     baseline_theme: active_theme.to_string(),
                     theme_cursor,
                     ui_font_select,

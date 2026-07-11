@@ -89,14 +89,6 @@ pub struct ZedThemeDef {
     pub style: RawStyle,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ThemeFamily {
-    pub name: String,
-    #[serde(default)]
-    pub author: Option<String>,
-    pub themes: Vec<ZedThemeDef>,
-}
-
 /// Decode a family, tolerating a malformed *variant* while keeping its
 /// siblings. The family shell (`name` + a `themes` array) must parse or this
 /// returns `Err` (whole file unusable); each variant is then decoded on its

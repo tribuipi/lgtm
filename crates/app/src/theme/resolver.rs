@@ -143,7 +143,8 @@ pub fn resolve(name: impl Into<String>, appearance: Appearance, style: &RawStyle
             .and_then(|s| s.font_style.as_deref())
             .map(|fs| fs.eq_ignore_ascii_case("italic"))
             .unwrap_or(false);
-        syntax.insert(token, SyntaxStyle { color, italic });
+        let bold = raw.and_then(|s| s.font_weight).map(|w| w >= 600.0).unwrap_or(false);
+        syntax.insert(token, SyntaxStyle { color, italic, bold });
     }
 
     Theme {
@@ -254,5 +255,18 @@ mod tests {
         assert!(t.syntax(Token::Comment).italic);
         assert_eq!(t.syntax(Token::Comment).color, rgb(0x777777));
         assert!(!t.syntax(Token::Keyword).italic);
+    }
+
+    #[test]
+    fn syntax_bold_from_font_weight() {
+        let t = resolve(
+            "X",
+            Appearance::Dark,
+            &style(r##"{ "syntax": { "keyword": { "color": "#ff00ff", "font_weight": 700 },
+                                    "function": { "color": "#00ff00" } } }"##),
+        );
+        // A weight >= 600 is bold; an omitted weight is not.
+        assert!(t.syntax(Token::Keyword).bold);
+        assert!(!t.syntax(Token::Function).bold);
     }
 }
