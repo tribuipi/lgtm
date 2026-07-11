@@ -1,4 +1,5 @@
 mod settings;
+mod settings_ui;
 mod theme;
 
 use anyhow::anyhow;
@@ -42,7 +43,7 @@ actions!(
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
         PaletteDown, PaletteBack, ClearSelection, CopySelection, FocusTreeFilter, ToggleMinimap,
-        ToggleComments, ToggleChat, SubmitReview
+        ToggleComments, ToggleChat, SubmitReview, OpenSettings
     ]
 );
 
@@ -109,6 +110,7 @@ fn main() {
                 KeyBinding::new("cmd-w", CloseItem, None),
                 KeyBinding::new("cmd-k", OpenPalette, None),
                 KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
                 // Palette navigation. The `Palette > Input` variants are bound
                 // after gpui_component::init, so at the input's dispatch depth
                 // they take precedence over the Input's own up/down (which a
@@ -3133,6 +3135,9 @@ struct ReviewApp {
     /// Bumped on every review-dialog open/close, same protocol as
     /// `composer_gen`.
     review_gen: u64,
+    /// `cmd-,` opens the settings modal (theme/fonts/size); root-level like
+    /// the other dialogs so its input escapes the "ReviewApp" key context.
+    settings: Option<settings_ui::SettingsUi>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -3239,6 +3244,7 @@ impl ReviewApp {
             composer_gen: 0,
             review: None,
             review_gen: 0,
+            settings: None,
             _subscriptions,
         };
         for source in sources {
@@ -5986,6 +5992,21 @@ impl Render for ReviewApp {
                     this.open_palette(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                if this.settings.is_some() {
+                    this.settings = None;
+                    window.focus(&this.focus_handle);
+                } else {
+                    let font_filter =
+                        cx.new(|cx| InputState::new(window, cx).placeholder("type to filter…"));
+                    font_filter.update(cx, |state, cx| state.focus(window, cx));
+                    this.settings = Some(settings_ui::SettingsUi {
+                        font_filter,
+                        focus: settings_ui::SettingsField::Theme,
+                    });
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| {
                 let targets = this.active_data().map(|d| d.file_rows.clone()).unwrap_or_default();
                 this.jump_next(&targets, cx)
@@ -6139,6 +6160,9 @@ impl Render for ReviewApp {
             })
             .when(self.palette.is_some(), |root| {
                 root.child(self.render_palette(cx))
+            })
+            .when(self.settings.is_some(), |root| {
+                root.child(self.render_settings(window, cx))
             })
     }
 }
