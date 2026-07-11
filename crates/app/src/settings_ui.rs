@@ -92,11 +92,26 @@ fn filtered_themes(query: &str) -> Vec<&'static str> {
 /// a re-measure of the monospace cell (code font or size may have changed —
 /// stale `char_width` would misalign diff columns and mouse selection),
 /// persist to disk, and repaint. Safe to call even when nothing changed.
-pub fn apply_and_save(app: &mut ReviewApp, cx: &mut Context<ReviewApp>) {
+///
+/// Also refocuses the shared `font_filter` input: clicking a theme swatch, a
+/// size stepper, or Reset moves focus off the input, and Escape only closes
+/// the modal while `font_filter` is focused (see the `InputEscape` handler
+/// on the modal card below). Refocusing here keeps Escape working no matter
+/// which control was just clicked.
+///
+/// Invariant: any change to `settings.theme_name` MUST be followed by
+/// `apply_ui_theme(&by_name(theme_name))` in the same synchronous step (as
+/// done here), or the bare accessors in `theme.rs` (`ACTIVE`) will diverge
+/// from the syntax/tint colors derived inline via `by_name`.
+pub fn apply_and_save(app: &mut ReviewApp, window: &mut Window, cx: &mut Context<ReviewApp>) {
     let s = cx.global::<settings::Settings>().clone();
     theme::apply_ui_theme(&theme::by_name(&s.theme_name), cx);
     app.char_width = None;
     s.save();
+    if let Some(ui) = &app.settings {
+        let input = ui.font_filter.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+    }
     cx.notify();
 }
 
@@ -233,8 +248,18 @@ impl ReviewApp {
         // below no matter which tab is showing.
         let body: gpui::AnyElement = match focus {
             SettingsField::Theme => {
+                let themes = filtered_themes(&query);
                 let mut row = div().flex().flex_wrap().gap_2();
-                for name in filtered_themes(&query) {
+                if themes.is_empty() {
+                    row = row.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_color(theme::overlay0())
+                            .child(SharedString::from("no matching themes")),
+                    );
+                }
+                for name in themes {
                     let active = name == active_theme_name;
                     row = row.child(
                         div()
@@ -256,11 +281,11 @@ impl ReviewApp {
                                         style.bg(Hsla::from(theme::surface0()).opacity(0.5))
                                     })
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.update_global::<settings::Settings, _>(|s, _| {
                                     s.theme_name = name.to_string();
                                 });
-                                apply_and_save(this, cx);
+                                apply_and_save(this, window, cx);
                             }))
                             .child(SharedString::from(name)),
                     );
@@ -294,7 +319,7 @@ impl ReviewApp {
                     let active = name == current;
                     let owned: String = name.to_string();
                     let is_ui = focus == SettingsField::UiFont;
-                    list = list.child(font_row(name, active, cx, move |this, _, cx| {
+                    list = list.child(font_row(name, active, cx, move |this, window, cx| {
                         cx.update_global::<settings::Settings, _>(|s, _| {
                             if is_ui {
                                 s.ui_font = Some(owned.clone());
@@ -302,7 +327,7 @@ impl ReviewApp {
                                 s.code_font = owned.clone();
                             }
                         });
-                        apply_and_save(this, cx);
+                        apply_and_save(this, window, cx);
                     }));
                 }
                 div()
@@ -333,12 +358,12 @@ impl ReviewApp {
                     .label("−")
                     .ghost()
                     .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         let size = cx.global::<settings::Settings>().font_size;
                         cx.update_global::<settings::Settings, _>(|s, _| {
                             s.set_font_size(size - 1.0)
                         });
-                        apply_and_save(this, cx);
+                        apply_and_save(this, window, cx);
                     })),
             )
             .child(
@@ -354,12 +379,12 @@ impl ReviewApp {
                     .label("+")
                     .ghost()
                     .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         let size = cx.global::<settings::Settings>().font_size;
                         cx.update_global::<settings::Settings, _>(|s, _| {
                             s.set_font_size(size + 1.0)
                         });
-                        apply_and_save(this, cx);
+                        apply_and_save(this, window, cx);
                     })),
             );
 
@@ -438,11 +463,11 @@ impl ReviewApp {
                                     .label("Reset to defaults")
                                     .ghost()
                                     .small()
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         cx.update_global::<settings::Settings, _>(|s, _| {
                                             *s = settings::Settings::default();
                                         });
-                                        apply_and_save(this, cx);
+                                        apply_and_save(this, window, cx);
                                     })),
                             ),
                     ),

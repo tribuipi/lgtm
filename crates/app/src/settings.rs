@@ -38,8 +38,30 @@ impl Settings {
         Some(dirs::config_dir()?.join("lgtm").join("config.toml"))
     }
 
+    /// Parses each field independently so a type error in one field (e.g. a
+    /// hand-edited `font_size = "big"`) falls back to that field's default
+    /// instead of discarding the whole document — `#[serde(default)]` only
+    /// covers MISSING fields, not invalid ones, since a single type error
+    /// fails `toml::from_str` for the entire struct.
     pub fn from_toml_str(text: &str) -> Self {
-        toml::from_str(text).unwrap_or_default()
+        let defaults = Self::default();
+        let Ok(toml::Value::Table(table)) = text.parse::<toml::Value>() else {
+            return defaults;
+        };
+        let field = |name: &str| table.get(name).cloned();
+        let theme_name = field("theme_name")
+            .and_then(|v| v.try_into::<String>().ok())
+            .unwrap_or(defaults.theme_name);
+        let ui_font = field("ui_font")
+            .and_then(|v| v.try_into::<Option<String>>().ok())
+            .unwrap_or(defaults.ui_font);
+        let code_font = field("code_font")
+            .and_then(|v| v.try_into::<String>().ok())
+            .unwrap_or(defaults.code_font);
+        let font_size = field("font_size")
+            .and_then(|v| v.try_into::<f32>().ok())
+            .unwrap_or(defaults.font_size);
+        Self { theme_name, ui_font, code_font, font_size }
     }
 
     pub fn load() -> Self {
@@ -129,6 +151,17 @@ mod tests {
         s.font_size = 26.0; // 2x baseline
         assert_eq!(s.scale(), 2.0);
         assert_eq!(s.row_height(), 44.0);
+    }
+
+    #[test]
+    fn type_error_in_one_field_preserves_other_valid_fields() {
+        // font_size has a type error; the other fields are valid and must survive.
+        let s = Settings::from_toml_str(
+            "theme_name = \"Tokyo Night\"\ncode_font = \"Monaco\"\nfont_size = \"big\"\n",
+        );
+        assert_eq!(s.theme_name, "Tokyo Night");
+        assert_eq!(s.code_font, "Monaco");
+        assert_eq!(s.font_size, 13.0); // bad field fell back to default
     }
 
     #[test]

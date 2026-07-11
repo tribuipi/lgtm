@@ -1894,6 +1894,7 @@ fn render_tree_row(
     data: &ItemData,
     entity: &gpui::Entity<ReviewApp>,
     stats_text_size: Pixels,
+    row_height: Pixels,
 ) -> gpui::AnyElement {
     let stats = |file: &FileDiff| {
         div()
@@ -1916,7 +1917,7 @@ fn render_tree_row(
     let entity = entity.clone();
     let base = div()
         .id(("tree-row", pos))
-        .h(px(TREE_ROW_HEIGHT))
+        .h(row_height)
         .w_full()
         .flex()
         .items_center()
@@ -2733,6 +2734,7 @@ fn palette_pr_row(
     pos: usize,
     selected: bool,
     entity: gpui::Entity<ReviewApp>,
+    row_height: Pixels,
 ) -> gpui::AnyElement {
     let dot = if pr.is_draft {
         theme::overlay0()
@@ -2743,7 +2745,7 @@ fn palette_pr_row(
         .id(("palette-pr", pos))
         .mx_1()
         .px_2()
-        .h(px(PALETTE_ROW_HEIGHT))
+        .h(row_height)
         .rounded_md()
         .flex()
         .items_center()
@@ -5512,6 +5514,7 @@ impl ReviewApp {
         let tree_scroll = self.active_data().map(|data| data.tree_scroll.clone());
         let entity = cx.entity();
         let stats_text_size = cx.global::<settings::Settings>().chrome(10.);
+        let tree_row_height = cx.global::<settings::Settings>().chrome(TREE_ROW_HEIGHT);
         let tree_list: gpui::AnyElement = match tree_scroll {
             Some(scroll) if !tree_rows.is_empty() => {
                 uniform_list("file-tree", tree_rows.len(), move |range, _window, cx| {
@@ -5529,6 +5532,7 @@ impl ReviewApp {
                                 data,
                                 &entity,
                                 stats_text_size,
+                                tree_row_height,
                             )
                         })
                         .collect()
@@ -5599,6 +5603,7 @@ impl ReviewApp {
             return div().into_any_element();
         };
         let query = self.palette_input.read(cx).value().to_string();
+        let palette_row_height = cx.global::<settings::Settings>().chrome(PALETTE_ROW_HEIGHT);
 
         let header: Option<SharedString> = match step {
             PaletteStep::Sources { .. } => None,
@@ -5626,7 +5631,7 @@ impl ReviewApp {
                             .id(("palette-source", opt))
                             .mx_1()
                             .px_2()
-                            .h(px(PALETTE_ROW_HEIGHT))
+                            .h(palette_row_height)
                             .rounded_md()
                             .flex()
                             .items_center()
@@ -5688,7 +5693,7 @@ impl ReviewApp {
                     let count = filtered.len();
                     div()
                         .py_1()
-                        .h(px(count.min(10) as f32 * PALETTE_ROW_HEIGHT + 8.))
+                        .h(palette_row_height * (count.min(10) as f32) + px(8.))
                         .child(
                             uniform_list("palette-prs", count, move |range, _window, cx| {
                                 let this = entity.read(cx);
@@ -5702,7 +5707,13 @@ impl ReviewApp {
                                 range
                                     .filter_map(|pos| Some((pos, &all[*filtered.get(pos)?])))
                                     .map(|(pos, pr)| {
-                                        palette_pr_row(pr, pos, pos == *selected, entity.clone())
+                                        palette_pr_row(
+                                            pr,
+                                            pos,
+                                            pos == *selected,
+                                            entity.clone(),
+                                            palette_row_height,
+                                        )
                                     })
                                     .collect()
                             })
@@ -5786,7 +5797,7 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    fn render_footer(&self, text_size: Pixels) -> impl IntoElement {
+    fn render_footer(&self, text_size: Pixels, height: Pixels) -> impl IntoElement {
         let hint = |keys: &[&str], label: &'static str| {
             let mut hint = div().flex().items_center().gap_1();
             for key in keys {
@@ -5799,7 +5810,7 @@ impl ReviewApp {
             )
         };
         div()
-            .h(px(28.))
+            .h(height)
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -6149,7 +6160,10 @@ impl Render for ReviewApp {
                         main.child(self.render_chat(window, cx))
                     }),
             )
-            .child(self.render_footer(cx.global::<settings::Settings>().chrome(12.)))
+            .child(self.render_footer(
+                cx.global::<settings::Settings>().chrome(12.),
+                cx.global::<settings::Settings>().chrome(28.),
+            ))
             // Root-level so the composer's input escapes the "ReviewApp" key
             // context (plain letters must stay text, like the palette input).
             .when(self.composer.is_some(), |root| {

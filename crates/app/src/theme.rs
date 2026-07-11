@@ -14,6 +14,12 @@ use gpui_component::{Theme as UiTheme, ThemeMode};
 use std::cell::RefCell;
 use syntax::Token;
 
+// Invariant: any change to `settings.theme_name` MUST be followed by
+// `apply_ui_theme(&by_name(theme_name))` in the same synchronous step, or
+// these bare accessors (backed by `ACTIVE`) will diverge from the
+// syntax/tint colors that render code derives inline via `by_name` — the
+// two are only kept in sync because every mutation path currently honors
+// this ordering (see `settings_ui::apply_and_save`).
 thread_local! {
     /// The palette the bare accessors below read from. Set by
     /// `apply_ui_theme` (and directly in tests). Defaults to Mocha so any
@@ -23,6 +29,10 @@ thread_local! {
 
 /// Install `theme` as the palette the bare color accessors return. Called by
 /// `apply_ui_theme`; exposed for tests that have no `App`.
+///
+/// Invariant: callers MUST also ensure `settings.theme_name` is (or already
+/// was) updated to match `theme` in the same synchronous step — see the
+/// module-level comment above `ACTIVE`.
 pub(crate) fn set_active_theme(theme: &Theme) {
     ACTIVE.with(|a| *a.borrow_mut() = theme.clone());
 }
