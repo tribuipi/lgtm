@@ -452,6 +452,7 @@ pub fn all_names() -> &'static [&'static str] {
 /// default (Catppuccin Mocha).
 pub fn by_name(name: &str) -> Theme {
     match name {
+        "Catppuccin Mocha" => catppuccin_mocha(),
         "Catppuccin Latte" => catppuccin_latte(),
         "Catppuccin Frappé" => catppuccin_frappe(),
         "Catppuccin Macchiato" => catppuccin_macchiato(),
