@@ -1271,8 +1271,8 @@ fn render_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(theme::background())
-                .hover(|style| style.bg(theme::element_bg()))
+                .bg(theme::element_bg())
+                .hover(|style| style.bg(theme::editor_bg()))
                 .cursor_pointer()
                 .text_color(theme::text_subtle())
                 .child(SharedString::from(format!("⋯ {hidden} hidden {noun}")))
@@ -1356,7 +1356,7 @@ fn render_row(
             .flex()
             .items_center()
             .px_3()
-            .bg(theme::background())
+            .bg(theme::element_bg())
             // Subtle upgrade indicator: full-content re-diffed hunks get a
             // faint blue label instead of the plain overlay color.
             .text_color(if *upgraded {
