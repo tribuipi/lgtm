@@ -49,7 +49,55 @@ actions!(
     ]
 );
 
+/// macOS apps launched from Finder/Dock inherit a minimal `PATH`
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) that omits Homebrew and other locations
+/// where `gh`, `git`, and `claude` live, so they fail to spawn — even though
+/// `cargo run` from a terminal works because it inherits the shell's `PATH`.
+/// Repair it by adopting the login shell's `PATH` on launch.
+fn fix_path() {
+    // Fast path: a terminal launch already carries a rich PATH.
+    let current = std::env::var("PATH").unwrap_or_default();
+    if current
+        .split(':')
+        .any(|p| p == "/opt/homebrew/bin" || p == "/usr/local/bin")
+    {
+        return;
+    }
+
+    // Ask the user's login+interactive shell for its PATH. A sentinel brackets
+    // the value so noise printed by shell startup files is stripped out.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let script = r#"printf '__LGTM_PATH_BEGIN__%s__LGTM_PATH_END__' "$PATH""#;
+    let Ok(output) = std::process::Command::new(&shell)
+        .args(["-ilc", script])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(shell_path) = stdout
+        .split_once("__LGTM_PATH_BEGIN__")
+        .and_then(|(_, rest)| rest.split_once("__LGTM_PATH_END__"))
+        .map(|(path, _)| path.trim())
+    else {
+        return;
+    };
+    if shell_path.is_empty() {
+        return;
+    }
+    let merged = if current.is_empty() {
+        shell_path.to_string()
+    } else {
+        format!("{shell_path}:{current}")
+    };
+    std::env::set_var("PATH", merged);
+}
+
 fn main() {
+    fix_path();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut sources = Vec::new();
     let mut errors = Vec::new();

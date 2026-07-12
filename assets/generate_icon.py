@@ -28,6 +28,12 @@ SS = 4                        # supersampling factor
 BASE = 1024                   # logical icon size
 N = BASE * SS                 # working canvas size
 
+# Apple's macOS icon grid: within a 1024 canvas, the rounded-rect body is
+# 824x824 (824/1024 ~= 0.8047), leaving a transparent margin so the icon sits
+# the same size as every other app in the Dock. Filling the whole canvas makes
+# the icon look oversized next to its neighbors.
+BODY_FRAC = 824 / 1024
+
 ASSETS = Path(__file__).resolve().parent
 ICONSET = ASSETS / "LGTM.iconset"
 ICNS = ASSETS / "LGTM.icns"
@@ -52,7 +58,7 @@ def vertical_gradient(size: int, top: tuple, bottom: tuple) -> Image.Image:
     return grad.resize((size, size))
 
 
-def draw_diff_rows(draw: ImageDraw.ImageDraw) -> None:
+def draw_diff_rows(draw: ImageDraw.ImageDraw, size: int) -> None:
     """Faint code-line bars behind the checkmark: two adds, one delete."""
     # (top_fraction, width_fraction, color, alpha)
     rows = [
@@ -60,11 +66,11 @@ def draw_diff_rows(draw: ImageDraw.ImageDraw) -> None:
         (0.45, 0.30, ADD_GREEN, 46),
         (0.60, 0.36, DEL_RED, 46),
     ]
-    left = int(0.20 * N)
-    height = int(0.055 * N)
+    left = int(0.20 * size)
+    height = int(0.055 * size)
     for top_frac, width_frac, color, alpha in rows:
-        top = int(top_frac * N)
-        right = left + int(width_frac * N)
+        top = int(top_frac * size)
+        right = left + int(width_frac * size)
         draw.rounded_rectangle(
             (left, top, right, top + height),
             radius=height // 2,
@@ -72,13 +78,13 @@ def draw_diff_rows(draw: ImageDraw.ImageDraw) -> None:
         )
 
 
-def draw_check(draw: ImageDraw.ImageDraw) -> None:
+def draw_check(draw: ImageDraw.ImageDraw, size: int) -> None:
     """Bold green checkmark with rounded caps."""
-    # Control points as fractions of the canvas.
-    p1 = (0.30 * N, 0.56 * N)   # start (left)
-    p2 = (0.44 * N, 0.70 * N)   # elbow (bottom)
-    p3 = (0.72 * N, 0.36 * N)   # end (top-right)
-    width = int(0.085 * N)
+    # Control points as fractions of the tile.
+    p1 = (0.30 * size, 0.56 * size)   # start (left)
+    p2 = (0.44 * size, 0.70 * size)   # elbow (bottom)
+    p3 = (0.72 * size, 0.36 * size)   # end (top-right)
+    width = int(0.085 * size)
     draw.line([p1, p2, p3], fill=ADD_GREEN + (255,), width=width, joint="curve")
     r = width // 2
     for cx, cy in (p1, p2, p3):
@@ -86,19 +92,27 @@ def draw_check(draw: ImageDraw.ImageDraw) -> None:
 
 
 def render() -> Image.Image:
+    # Render the icon body as a self-contained squircle tile...
+    body = round(BODY_FRAC * N)
+
     # Background layer (opaque gradient), masked to the squircle.
-    bg = vertical_gradient(N, BG_TOP, BG_BOTTOM).convert("RGBA")
+    bg = vertical_gradient(body, BG_TOP, BG_BOTTOM).convert("RGBA")
 
     # Foreground layer (diff rows + check) drawn with alpha, then composited.
-    fg = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    fg = Image.new("RGBA", (body, body), (0, 0, 0, 0))
     d = ImageDraw.Draw(fg)
-    draw_diff_rows(d)
-    draw_check(d)
-    icon = Image.alpha_composite(bg, fg)
+    draw_diff_rows(d, body)
+    draw_check(d, body)
+    tile = Image.alpha_composite(bg, fg)
 
     # Apply squircle mask. Corner radius ~22.4% is the macOS-ish look.
-    mask = rounded_mask(N, int(0.2237 * N))
-    icon.putalpha(mask)
+    mask = rounded_mask(body, int(0.2237 * body))
+    tile.putalpha(mask)
+
+    # ...then center it on a transparent canvas so the Apple margin is preserved.
+    icon = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    offset = (N - body) // 2
+    icon.paste(tile, (offset, offset))
 
     return icon.resize((BASE, BASE), Image.Resampling.LANCZOS)
 
