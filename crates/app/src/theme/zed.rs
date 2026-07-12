@@ -6,8 +6,30 @@
 //! lenient shape into a guaranteed-complete `Theme` is the resolver's job.
 
 use gpui::Rgba;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+
+/// Deserialize an optional color, tolerating Zed extension themes that ship
+/// bare hex (`"0f4b6e"`) without the leading `#` gpui's parser requires. A
+/// missing key or explicit `null` stays `None`; a non-string or genuinely
+/// malformed value still errors so the variant is skipped as before.
+fn de_opt_rgba<'de, D>(deserializer: D) -> Result<Option<Rgba>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    let normalized = if trimmed.starts_with('#') {
+        trimmed.to_string()
+    } else {
+        format!("#{trimmed}")
+    };
+    Rgba::try_from(normalized.as_str())
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,7 +40,7 @@ pub enum RawAppearance {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RawSyntaxStyle {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub color: Option<Rgba>,
     #[serde(default)]
     pub font_style: Option<String>,
@@ -28,9 +50,9 @@ pub struct RawSyntaxStyle {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RawPlayer {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub cursor: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub selection: Option<Rgba>,
 }
 
@@ -39,41 +61,45 @@ pub struct RawPlayer {
 /// in the file is ignored.
 #[derive(Debug, Default, Deserialize)]
 pub struct RawStyle {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub background: Option<Rgba>,
-    #[serde(rename = "editor.background", default)]
+    #[serde(rename = "editor.background", default, deserialize_with = "de_opt_rgba")]
     pub editor_background: Option<Rgba>,
-    #[serde(rename = "editor.foreground", default)]
+    #[serde(rename = "editor.foreground", default, deserialize_with = "de_opt_rgba")]
     pub editor_foreground: Option<Rgba>,
-    #[serde(rename = "surface.background", default)]
+    #[serde(rename = "surface.background", default, deserialize_with = "de_opt_rgba")]
     pub surface_background: Option<Rgba>,
-    #[serde(rename = "elevated_surface.background", default)]
+    #[serde(
+        rename = "elevated_surface.background",
+        default,
+        deserialize_with = "de_opt_rgba"
+    )]
     pub elevated_surface_background: Option<Rgba>,
-    #[serde(rename = "element.background", default)]
+    #[serde(rename = "element.background", default, deserialize_with = "de_opt_rgba")]
     pub element_background: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub border: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub text: Option<Rgba>,
-    #[serde(rename = "text.muted", default)]
+    #[serde(rename = "text.muted", default, deserialize_with = "de_opt_rgba")]
     pub text_muted: Option<Rgba>,
-    #[serde(rename = "text.placeholder", default)]
+    #[serde(rename = "text.placeholder", default, deserialize_with = "de_opt_rgba")]
     pub text_placeholder: Option<Rgba>,
-    #[serde(rename = "text.accent", default)]
+    #[serde(rename = "text.accent", default, deserialize_with = "de_opt_rgba")]
     pub text_accent: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub created: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub deleted: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub modified: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub error: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub warning: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub success: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rgba")]
     pub info: Option<Rgba>,
     #[serde(default)]
     pub players: Vec<RawPlayer>,
@@ -130,6 +156,19 @@ mod tests {
         assert!(style.background.is_none()); // missing key
         assert!(style.players.is_empty());
         assert!(style.syntax.is_empty());
+    }
+
+    #[test]
+    fn tolerates_bare_hex_without_leading_hash() {
+        // Zed extension themes sometimes ship hex without `#` (e.g. Tokyo Night's
+        // "0f4b6e"). We prepend it rather than skipping the whole variant.
+        let style: RawStyle = serde_json::from_str(
+            r##"{ "text": "0f4b6e", "border": " 313244 ", "editor.background": "#1e1e2eff" }"##,
+        )
+        .unwrap();
+        assert_eq!(style.text, Some(Rgba::try_from("#0f4b6e").unwrap()));
+        assert_eq!(style.border, Some(Rgba::try_from("#313244").unwrap()));
+        assert!(style.editor_background.is_some());
     }
 
     #[test]
