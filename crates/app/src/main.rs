@@ -1,3 +1,5 @@
+mod settings;
+mod settings_ui;
 mod theme;
 
 use anyhow::anyhow;
@@ -22,15 +24,12 @@ use gpui_component::{
     input::{Escape as InputEscape, Input, InputEvent, InputState},
     kbd::Kbd,
     scroll::Scrollbar,
+    select::{SearchableVec, SelectEvent, SelectState},
     tag::Tag,
-    Disableable as _, IconName, Root, Sizable as _, TitleBar,
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Root, Sizable as _, TitleBar,
 };
 use std::ops::Range;
 use std::path::Path;
-
-const MONO: &str = "Menlo";
-const ROW_HEIGHT: f32 = 22.0;
-const TEXT_SIZE: f32 = 13.0;
 
 /// Gutter widths in px, matching render_row's fixed-width children: unified is
 /// two 44px line-number columns + a 28px marker; each split cell is one of
@@ -45,7 +44,8 @@ actions!(
         NextFile, PrevFile, NextHunk, PrevHunk, GoToTop, GoToBottom, ToggleView, Quit,
         ToggleSidebar, OpenInput, CloseItem, NextItem, PrevItem, Refresh, OpenPalette, PaletteUp,
         PaletteDown, PaletteBack, ClearSelection, CopySelection, FocusTreeFilter, ToggleMinimap,
-        ToggleComments, ToggleChat, SubmitReview
+        ToggleComments, ToggleChat, SubmitReview, OpenSettings, CloseSettings,
+        SettingsThemePrev, SettingsThemeNext, SettingsThemeConfirm
     ]
 );
 
@@ -79,7 +79,9 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            theme::apply_ui_theme(cx);
+            let settings = settings::Settings::load();
+            theme::apply_ui_theme(&theme::load_active(&settings.theme_name), cx);
+            cx.set_global(settings);
             cx.bind_keys([
                 KeyBinding::new("]", NextFile, Some("ReviewApp")),
                 KeyBinding::new("[", PrevFile, Some("ReviewApp")),
@@ -110,6 +112,14 @@ fn main() {
                 KeyBinding::new("cmd-w", CloseItem, None),
                 KeyBinding::new("cmd-k", OpenPalette, None),
                 KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("escape", CloseSettings, Some("Settings")),
+                // Theme-list keyboard navigation, active while the settings
+                // card holds focus (a focused font dropdown consumes these in
+                // its own "Select" context first).
+                KeyBinding::new("up", SettingsThemePrev, Some("Settings")),
+                KeyBinding::new("down", SettingsThemeNext, Some("Settings")),
+                KeyBinding::new("enter", SettingsThemeConfirm, Some("Settings")),
                 // Palette navigation. The `Palette > Input` variants are bound
                 // after gpui_component::init, so at the input's dispatch depth
                 // they take precedence over the Input's own up/down (which a
@@ -1026,20 +1036,23 @@ fn build_rows(
 }
 
 /// Per-kind row tint, word-highlight tint, gutter marker, and marker color.
-fn kind_style(kind: LineKind) -> (Option<gpui::Rgba>, Option<gpui::Rgba>, &'static str, gpui::Rgba) {
+fn kind_style(
+    kind: LineKind,
+    theme: &theme::Theme,
+) -> (Option<gpui::Rgba>, Option<gpui::Rgba>, &'static str, gpui::Rgba) {
     match kind {
-        LineKind::Context => (None, None, "", theme::overlay0()),
+        LineKind::Context => (None, None, "", theme::text_subtle()),
         LineKind::Added => (
-            Some(theme::added_row_bg()),
-            Some(theme::added_word_bg()),
+            Some(theme::added_row_bg(theme)),
+            Some(theme::added_word_bg(theme)),
             "+",
-            theme::green(),
+            theme::created(),
         ),
         LineKind::Removed => (
-            Some(theme::removed_row_bg()),
-            Some(theme::removed_word_bg()),
+            Some(theme::removed_row_bg(theme)),
+            Some(theme::removed_word_bg(theme)),
             "−",
-            theme::red(),
+            theme::deleted(),
         ),
     }
 }
@@ -1056,6 +1069,7 @@ fn merge_highlights(
     intra: &[Range<usize>],
     word_bg: Option<gpui::Rgba>,
     selection: Option<Range<usize>>,
+    theme: &theme::Theme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut bounds = Vec::with_capacity(2 * (syntax.len() + intra.len() + 1));
     for (range, _) in syntax {
@@ -1091,12 +1105,12 @@ fn merge_highlights(
         if token.is_none() && !in_intra && !in_sel {
             continue;
         }
-        let mut style = token.map(theme::token_style).unwrap_or_default();
+        let mut style = token.map(|t| theme::token_style(theme, t)).unwrap_or_default();
         if in_intra {
             style.background_color = word_bg.map(Into::into);
         }
         if in_sel {
-            style.background_color = Some(theme::selection_bg().into());
+            style.background_color = Some(theme::selection_bg(theme).into());
         }
         match out.last_mut() {
             // Coalesce adjacent identically-styled segments.
@@ -1117,8 +1131,9 @@ fn line_content(
     intra: &[Range<usize>],
     word_bg: Option<gpui::Rgba>,
     selection: Option<Range<usize>>,
+    theme: &theme::Theme,
 ) -> gpui::AnyElement {
-    let highlights = merge_highlights(syntax, intra, word_bg, selection);
+    let highlights = merge_highlights(syntax, intra, word_bg, selection, theme);
     if highlights.is_empty() {
         div().child(text.clone()).into_any_element()
     } else {
@@ -1130,9 +1145,9 @@ fn line_content(
 
 /// Shared shape of every comment row: indented card with a mantle background
 /// and a blue left accent, spanning full width in both view modes.
-fn comment_row(inner: gpui::AnyElement) -> gpui::AnyElement {
+fn comment_row(inner: gpui::AnyElement, row_height: Pixels) -> gpui::AnyElement {
     div()
-        .h(px(ROW_HEIGHT))
+        .h(row_height)
         .w_full()
         .flex()
         .child(div().w(px(72.)).flex_shrink_0())
@@ -1141,9 +1156,9 @@ fn comment_row(inner: gpui::AnyElement) -> gpui::AnyElement {
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .bg(theme::mantle())
+                .bg(theme::surface())
                 .border_l_2()
-                .border_color(theme::blue())
+                .border_color(theme::accent())
                 .px_3()
                 .flex()
                 .items_center()
@@ -1163,8 +1178,10 @@ fn render_row(
     row: &Row,
     selection: Option<(SelSide, Range<usize>)>,
     entity: &gpui::Entity<ReviewApp>,
+    theme: &theme::Theme,
+    row_height: Pixels,
+    meta_text_size: Pixels,
 ) -> gpui::AnyElement {
-    let row_height = px(ROW_HEIGHT);
     match row {
         Row::CommentHeader {
             author,
@@ -1175,7 +1192,7 @@ fn render_row(
             if *is_reply {
                 inner = inner.child(
                     div()
-                        .text_color(theme::overlay0())
+                        .text_color(theme::text_subtle())
                         .child(SharedString::from("↳")),
                 );
             }
@@ -1189,19 +1206,21 @@ fn render_row(
                     )
                     .child(
                         div()
-                            .text_color(theme::overlay0())
-                            .text_size(px(11.))
+                            .text_color(theme::text_subtle())
+                            .text_size(meta_text_size)
                             .child(when.clone()),
                     )
                     .into_any_element(),
+                row_height,
             )
         }
         Row::CommentBody { line } => comment_row(
             div()
                 .whitespace_nowrap()
-                .text_color(theme::subtext())
+                .text_color(theme::text_muted())
                 .child(line.clone())
                 .into_any_element(),
+            row_height,
         ),
         Row::CommentActions {
             root_id,
@@ -1216,7 +1235,7 @@ fn render_row(
                 div()
                     .id(("reply", root_id as usize))
                     .cursor_pointer()
-                    .text_color(theme::blue())
+                    .text_color(theme::accent())
                     .hover(|style| style.opacity(0.8))
                     .child(SharedString::from("↳ reply"))
                     .on_click(move |_, window, cx| {
@@ -1233,6 +1252,7 @@ fn render_row(
                         });
                     })
                     .into_any_element(),
+                row_height,
             )
         }
         Row::Spacer => div().h(row_height).into_any_element(),
@@ -1251,10 +1271,10 @@ fn render_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(theme::crust())
-                .hover(|style| style.bg(theme::surface0()))
+                .bg(theme::element_bg())
+                .hover(|style| style.bg(theme::editor_bg()))
                 .cursor_pointer()
-                .text_color(theme::overlay0())
+                .text_color(theme::text_subtle())
                 .child(SharedString::from(format!("⋯ {hidden} hidden {noun}")))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.expand_gap(file_ix, gap_ix, cx));
@@ -1279,7 +1299,7 @@ fn render_row(
                 .items_center()
                 .gap_3()
                 .px_3()
-                .bg(theme::mantle())
+                .bg(theme::surface())
                 .child(
                     Tag::custom(status.opacity(0.15), status, status.opacity(0.4))
                         .small()
@@ -1294,7 +1314,7 @@ fn render_row(
             if let Some(old_path) = old_path {
                 header = header.child(
                     div()
-                        .text_color(theme::overlay0())
+                        .text_color(theme::text_subtle())
                         .child(SharedString::from(format!("← {old_path}"))),
                 );
             }
@@ -1311,8 +1331,8 @@ fn render_row(
                 }
                 header = header.child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(theme::overlay0())
+                        .text_size(meta_text_size)
+                        .text_color(theme::text_subtle())
                         .child(SharedString::from(note)),
                 );
             }
@@ -1320,12 +1340,12 @@ fn render_row(
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_color(theme::green())
+                        .text_color(theme::created())
                         .child(SharedString::from(format!("+{additions}"))),
                 )
                 .child(
                     div()
-                        .text_color(theme::red())
+                        .text_color(theme::deleted())
                         .child(SharedString::from(format!("−{deletions}"))),
                 )
                 .into_any_element()
@@ -1336,13 +1356,13 @@ fn render_row(
             .flex()
             .items_center()
             .px_3()
-            .bg(theme::crust())
+            .bg(theme::element_bg())
             // Subtle upgrade indicator: full-content re-diffed hunks get a
             // faint blue label instead of the plain overlay color.
             .text_color(if *upgraded {
-                Hsla::from(theme::blue()).opacity(0.55)
+                Hsla::from(theme::accent()).opacity(0.55)
             } else {
-                theme::overlay0().into()
+                theme::text_subtle().into()
             })
             .child(label.clone())
             .into_any_element(),
@@ -1351,7 +1371,7 @@ fn render_row(
             .flex()
             .items_center()
             .px_3()
-            .text_color(theme::overlay0())
+            .text_color(theme::text_subtle())
             .child(SharedString::from("binary file changed"))
             .into_any_element(),
         Row::Line {
@@ -1362,12 +1382,12 @@ fn render_row(
             intra,
             syntax,
         } => {
-            let (row_bg, word_bg, marker, marker_color) = kind_style(*kind);
+            let (row_bg, word_bg, marker, marker_color) = kind_style(*kind, theme);
             let number = |no: Option<u32>| {
                 div()
                     .w(px(44.))
                     .flex_shrink_0()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .flex()
                     .justify_end()
                     .child(SharedString::from(
@@ -1396,6 +1416,7 @@ fn render_row(
                         intra,
                         word_bg,
                         selection.map(|(_, range)| range),
+                        theme,
                     )),
                 )
                 .into_any_element()
@@ -1415,9 +1436,9 @@ fn render_row(
                     .flex()
                     .items_center();
                 let Some(cell) = cell else {
-                    return base.bg(theme::void_cell_bg());
+                    return base.bg(theme::void_cell_bg(theme));
                 };
-                let (row_bg, word_bg, marker, marker_color) = kind_style(cell.kind);
+                let (row_bg, word_bg, marker, marker_color) = kind_style(cell.kind, theme);
                 let mut side = base;
                 if let Some(bg) = row_bg {
                     side = side.bg(bg);
@@ -1426,7 +1447,7 @@ fn render_row(
                     div()
                         .w(px(44.))
                         .flex_shrink_0()
-                        .text_color(theme::overlay0())
+                        .text_color(theme::text_subtle())
                         .flex()
                         .justify_end()
                         .child(SharedString::from(cell.no.to_string())),
@@ -1446,6 +1467,7 @@ fn render_row(
                     &cell.intra,
                     word_bg,
                     sel,
+                    theme,
                 )))
             };
             // w_full is load-bearing: without a definite row width the row
@@ -1461,10 +1483,10 @@ fn render_row(
                         .w(px(6.))
                         .flex_shrink_0()
                         .h_full()
-                        .bg(theme::crust())
+                        .bg(theme::background())
                         .border_l_1()
                         .border_r_1()
-                        .border_color(theme::surface0()),
+                        .border_color(theme::border()),
                 )
                 .child(cell(right, right_sel))
                 .into_any_element()
@@ -1855,11 +1877,11 @@ fn fuzzy_file_matches(paths: &[&str], query: &str) -> Vec<usize> {
 /// Status label and color, shared by file headers and tree entries.
 fn status_style(status: FileStatus) -> (&'static str, gpui::Rgba) {
     match status {
-        FileStatus::Added => ("added", theme::green()),
-        FileStatus::Deleted => ("deleted", theme::red()),
-        FileStatus::Modified => ("modified", theme::blue()),
-        FileStatus::Renamed => ("renamed", theme::mauve()),
-        FileStatus::Binary => ("binary", theme::peach()),
+        FileStatus::Added => ("added", theme::created()),
+        FileStatus::Deleted => ("deleted", theme::deleted()),
+        FileStatus::Modified => ("modified", theme::modified()),
+        FileStatus::Renamed => ("renamed", theme::accent()),
+        FileStatus::Binary => ("binary", theme::warning()),
     }
 }
 
@@ -1880,6 +1902,8 @@ fn render_tree_row(
     current: bool,
     data: &ItemData,
     entity: &gpui::Entity<ReviewApp>,
+    stats_text_size: Pixels,
+    row_height: Pixels,
 ) -> gpui::AnyElement {
     let stats = |file: &FileDiff| {
         div()
@@ -1887,31 +1911,31 @@ fn render_tree_row(
             .items_center()
             .gap_1()
             .flex_shrink_0()
-            .text_size(px(10.))
+            .text_size(stats_text_size)
             .child(
                 div()
-                    .text_color(Hsla::from(theme::green()).opacity(0.7))
+                    .text_color(Hsla::from(theme::created()).opacity(0.7))
                     .child(SharedString::from(format!("+{}", file.additions))),
             )
             .child(
                 div()
-                    .text_color(Hsla::from(theme::red()).opacity(0.7))
+                    .text_color(Hsla::from(theme::deleted()).opacity(0.7))
                     .child(SharedString::from(format!("−{}", file.deletions))),
             )
     };
     let entity = entity.clone();
     let base = div()
         .id(("tree-row", pos))
-        .h(px(TREE_ROW_HEIGHT))
+        .h(row_height)
         .w_full()
         .flex()
         .items_center()
         .gap_1()
         .pr_2()
         .cursor_pointer()
-        .when(current, |row| row.bg(theme::surface0()))
+        .when(current, |row| row.bg(theme::element_bg()))
         .when(!current, |row| {
-            row.hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+            row.hover(|style| style.bg(Hsla::from(theme::element_bg()).opacity(0.5)))
         });
     match row {
         TreeListRow::Entry(entry_ix) => {
@@ -1927,14 +1951,14 @@ fn render_tree_row(
                         div()
                             .w(px(12.))
                             .flex_shrink_0()
-                            .text_color(theme::overlay0())
+                            .text_color(theme::text_subtle())
                             .child(SharedString::from(chevron)),
                     )
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_color(theme::overlay0())
+                            .text_color(theme::text_subtle())
                             .child(entry.name.clone()),
                     )
                     .into_any_element()
@@ -2054,12 +2078,12 @@ impl ItemData {
     /// (visibility toggle, comment refetch), keeping the viewport anchored:
     /// the first visible non-comment row stays put even though comment rows
     /// above it appeared or disappeared.
-    fn rebuild_rows_anchored(&mut self) {
+    fn rebuild_rows_anchored(&mut self, row_height: f32) {
         let offset = self.scroll.0.borrow().base_handle.offset();
         let top_px = f32::from(-offset.y).max(0.);
         let top_row =
-            ((top_px / ROW_HEIGHT).floor() as usize).min(self.rows.len().saturating_sub(1));
-        let frac = top_px - top_row as f32 * ROW_HEIGHT;
+            ((top_px / row_height).floor() as usize).min(self.rows.len().saturating_sub(1));
+        let frac = top_px - top_row as f32 * row_height;
         let count_noncomment =
             |rows: &[Row]| rows.iter().filter(|row| !is_comment_row(row)).count();
         let top_base = count_noncomment(&self.rows[..top_row]);
@@ -2076,7 +2100,7 @@ impl ItemData {
         let new_top = nth_noncomment_row(&self.rows, top_base);
         self.scroll.0.borrow().base_handle.set_offset(point(
             offset.x,
-            px(-(new_top as f32 * ROW_HEIGHT + frac)),
+            px(-(new_top as f32 * row_height + frac)),
         ));
     }
 
@@ -2147,16 +2171,16 @@ impl ReviewItem {
 
     fn dot_color(&self) -> gpui::Rgba {
         match &self.source {
-            Source::Local(_) => theme::blue(),
+            Source::Local(_) => theme::accent(),
             Source::Pr(_) => match &self.state {
                 ItemState::Ready(data) => match data.pr_meta.as_ref().map(|m| m.state.as_str()) {
-                    Some("OPEN") => theme::green(),
-                    Some("MERGED") => theme::mauve(),
-                    Some("CLOSED") => theme::red(),
-                    _ => theme::overlay0(),
+                    Some("OPEN") => theme::success(),
+                    Some("MERGED") => theme::accent(),
+                    Some("CLOSED") => theme::error(),
+                    _ => theme::text_subtle(),
                 },
-                ItemState::Failed(_) => theme::red(),
-                ItemState::Loading => theme::overlay0(),
+                ItemState::Failed(_) => theme::error(),
+                ItemState::Loading => theme::text_subtle(),
             },
         }
     }
@@ -2492,7 +2516,7 @@ fn app_title(detail: Option<String>) -> gpui::AnyElement {
     if let Some(detail) = detail {
         title = title.child(
             div()
-                .text_color(theme::subtext())
+                .text_color(theme::text_muted())
                 .truncate()
                 .child(SharedString::from(detail)),
         );
@@ -2502,16 +2526,16 @@ fn app_title(detail: Option<String>) -> gpui::AnyElement {
 
 fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::AnyElement {
     let (state_color, state_label) = match meta.state.as_str() {
-        "OPEN" => (theme::green(), "open"),
-        "MERGED" => (theme::mauve(), "merged"),
-        "CLOSED" => (theme::red(), "closed"),
-        other => (theme::overlay0(), other),
+        "OPEN" => (theme::success(), "open"),
+        "MERGED" => (theme::accent(), "merged"),
+        "CLOSED" => (theme::error(), "closed"),
+        other => (theme::text_subtle(), other),
     };
     let state: Hsla = state_color.into();
     // The PR's overall review decision, when it has one.
     let decision = match meta.review_decision.as_str() {
-        "APPROVED" => Some((theme::green(), "approved")),
-        "CHANGES_REQUESTED" => Some((theme::red(), "changes requested")),
+        "APPROVED" => Some((theme::success(), "approved")),
+        "CHANGES_REQUESTED" => Some((theme::error(), "changes requested")),
         _ => None,
     };
     let url = meta.url.clone();
@@ -2540,12 +2564,12 @@ fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::
                 )
                 .child(
                     div()
-                        .text_color(theme::subtext())
+                        .text_color(theme::text_muted())
                         .child(SharedString::from(format!("#{}", meta.number))),
                 )
                 .child(
                     div()
-                        .text_color(theme::subtext())
+                        .text_color(theme::text_muted())
                         .whitespace_nowrap()
                         .child(SharedString::from(format!("by {}", meta.author.login))),
                 )
@@ -2565,17 +2589,17 @@ fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::
                 .gap_2()
                 .flex_shrink_0()
                 .pr_3()
-                .child(div().text_color(theme::overlay0()).child(SharedString::from(
+                .child(div().text_color(theme::text_subtle()).child(SharedString::from(
                     format!("{} ← {}", meta.base_ref_name, meta.head_ref_name),
                 )))
                 .child(
                     div()
-                        .text_color(theme::green())
+                        .text_color(theme::created())
                         .child(SharedString::from(format!("+{}", meta.additions))),
                 )
                 .child(
                     div()
-                        .text_color(theme::red())
+                        .text_color(theme::deleted())
                         .child(SharedString::from(format!("−{}", meta.deletions))),
                 )
                 .child(
@@ -2601,7 +2625,7 @@ fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::
 }
 
 fn local_titlebar_content(src: &git::LocalSource, data: &ItemData) -> gpui::AnyElement {
-    let blue: Hsla = theme::blue().into();
+    let blue: Hsla = theme::accent().into();
     div()
         .flex()
         .items_center()
@@ -2633,17 +2657,17 @@ fn local_titlebar_content(src: &git::LocalSource, data: &ItemData) -> gpui::AnyE
                 .gap_2()
                 .flex_shrink_0()
                 .pr_3()
-                .child(div().text_color(theme::overlay0()).child(SharedString::from(
+                .child(div().text_color(theme::text_subtle()).child(SharedString::from(
                     format!("{} ← {}", src.base_label, src.branch),
                 )))
                 .child(
                     div()
-                        .text_color(theme::green())
+                        .text_color(theme::created())
                         .child(SharedString::from(format!("+{}", data.additions))),
                 )
                 .child(
                     div()
-                        .text_color(theme::red())
+                        .text_color(theme::deleted())
                         .child(SharedString::from(format!("−{}", data.deletions))),
                 ),
         )
@@ -2719,25 +2743,26 @@ fn palette_pr_row(
     pos: usize,
     selected: bool,
     entity: gpui::Entity<ReviewApp>,
+    row_height: Pixels,
 ) -> gpui::AnyElement {
     let dot = if pr.is_draft {
-        theme::overlay0()
+        theme::text_subtle()
     } else {
-        theme::green()
+        theme::success()
     };
     div()
         .id(("palette-pr", pos))
         .mx_1()
         .px_2()
-        .h(px(PALETTE_ROW_HEIGHT))
+        .h(row_height)
         .rounded_md()
         .flex()
         .items_center()
         .gap_2()
         .cursor_pointer()
-        .when(selected, |row| row.bg(theme::surface0()))
+        .when(selected, |row| row.bg(theme::element_bg()))
         .when(!selected, |row| {
-            row.hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+            row.hover(|style| style.bg(Hsla::from(theme::element_bg()).opacity(0.5)))
         })
         .on_click(move |_, window, cx| {
             entity.update(cx, |this, cx| this.palette_open_pr_row(pos, window, cx));
@@ -2753,7 +2778,7 @@ fn palette_pr_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(theme::subtext())
+                .text_color(theme::text_muted())
                 .child(SharedString::from(format!("#{}", pr.number))),
         )
         .child(
@@ -2767,7 +2792,7 @@ fn palette_pr_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(theme::subtext())
+                .text_color(theme::text_muted())
                 .child(SharedString::from(pr.author.login.clone())),
         )
         .child(
@@ -2775,7 +2800,7 @@ fn palette_pr_row(
                 .flex_shrink_0()
                 .max_w(px(140.))
                 .truncate()
-                .text_color(theme::overlay0())
+                .text_color(theme::text_subtle())
                 .child(SharedString::from(pr.head_ref_name.clone())),
         )
         .into_any_element()
@@ -3107,7 +3132,7 @@ struct ReviewApp {
     chat_visible: bool,
     /// A minimap scrub drag is in progress (mouse went down on the minimap).
     minimap_scrub: bool,
-    /// Advance width of one monospace cell at (MONO, TEXT_SIZE), measured once.
+    /// Advance width of one monospace cell at (code_font, font_size), measured once.
     char_width: Option<Pixels>,
     /// Diff row + split half under the pointer where a hover "+" (new
     /// comment) affordance shows; None when the pointer isn't on a
@@ -3121,6 +3146,9 @@ struct ReviewApp {
     /// Bumped on every review-dialog open/close, same protocol as
     /// `composer_gen`.
     review_gen: u64,
+    /// `cmd-,` opens the settings modal (theme/fonts/size); root-level like
+    /// the other dialogs so its input escapes the "ReviewApp" key context.
+    settings: Option<settings_ui::SettingsUi>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -3227,6 +3255,7 @@ impl ReviewApp {
             composer_gen: 0,
             review: None,
             review_gen: 0,
+            settings: None,
             _subscriptions,
         };
         for source in sources {
@@ -3256,13 +3285,17 @@ impl ReviewApp {
 
     /// Advance width of one monospace cell, measured once via the text system
     /// (Menlo is monospace, so 'm' stands in for every glyph).
-    fn char_width(&mut self, window: &Window) -> Pixels {
+    fn char_width(&mut self, window: &Window, cx: &App) -> Pixels {
+        let (code_font, size) = {
+            let s = cx.global::<settings::Settings>();
+            (s.code_font.clone(), s.font_size)
+        };
         *self.char_width.get_or_insert_with(|| {
             let text_system = window.text_system();
-            let font_id = text_system.resolve_font(&font(MONO));
+            let font_id = text_system.resolve_font(&font(SharedString::from(code_font)));
             text_system
-                .em_advance(font_id, px(TEXT_SIZE))
-                .unwrap_or(px(TEXT_SIZE * 0.6))
+                .em_advance(font_id, px(size))
+                .unwrap_or(px(size * 0.6))
         })
     }
 
@@ -3275,6 +3308,7 @@ impl ReviewApp {
         &self,
         position: Point<Pixels>,
         char_width: Pixels,
+        row_height: f32,
         locked: Option<SelSide>,
     ) -> Option<(SelSide, RowCol)> {
         let data = self.active_data()?;
@@ -3287,7 +3321,7 @@ impl ReviewApp {
         };
         // offset.y is negative when scrolled down.
         let y = f32::from(position.y - bounds.top() - offset.y);
-        let row = ((y / ROW_HEIGHT).floor().max(0.) as usize).min(data.rows.len() - 1);
+        let row = ((y / row_height).floor().max(0.) as usize).min(data.rows.len() - 1);
         let rel_x = f32::from(position.x - bounds.left());
         let (side, text_x) = match data.mode {
             // offset.x is negative when scrolled right (unified mode only;
@@ -3470,6 +3504,7 @@ impl ReviewApp {
     /// viewport stable: when the expansion happens above the visible top row,
     /// the scroll offset shifts down by exactly the inserted height.
     fn expand_gap(&mut self, file_ix: usize, gap_ix: usize, cx: &mut Context<Self>) {
+        let row_height = cx.global::<settings::Settings>().row_height();
         let Some(data) = self.active_data_mut() else {
             return;
         };
@@ -3502,11 +3537,11 @@ impl ReviewApp {
             let scroll = data.scroll.0.borrow();
             let offset = scroll.base_handle.offset();
             // offset.y is negative when scrolled down.
-            let top_row = (f32::from(-offset.y) / ROW_HEIGHT).floor() as usize;
+            let top_row = (f32::from(-offset.y) / row_height).floor() as usize;
             if gap_row < top_row {
                 scroll.base_handle.set_offset(point(
                     offset.x,
-                    offset.y - px(inserted as f32 * ROW_HEIGHT),
+                    offset.y - px(inserted as f32 * row_height),
                 ));
             }
         }
@@ -3958,8 +3993,9 @@ impl ReviewApp {
         let px_per_row = slot_h / group as f32;
         let y = f32::from(position.y - bounds.top());
         let row = (y / px_per_row).clamp(0., (total - 1) as f32);
-        let target = row * ROW_HEIGHT - (pane_h - ROW_HEIGHT) / 2.;
-        let max_scroll = (total as f32 * ROW_HEIGHT - pane_h).max(0.);
+        let row_height = cx.global::<settings::Settings>().row_height();
+        let target = row * row_height - (pane_h - row_height) / 2.;
+        let max_scroll = (total as f32 * row_height - pane_h).max(0.);
         data.scroll
             .0
             .borrow()
@@ -3978,7 +4014,7 @@ impl ReviewApp {
             return; // Local item: no comment affordances.
         }
         data.comments_visible = !data.comments_visible;
-        data.rebuild_rows_anchored();
+        data.rebuild_rows_anchored(cx.global::<settings::Settings>().row_height());
         cx.notify();
     }
 
@@ -3989,11 +4025,13 @@ impl ReviewApp {
         &mut self,
         position: Point<Pixels>,
         window: &Window,
+        cx: &App,
     ) -> Option<(usize, SelSide)> {
         if self.palette.is_some() {
             return None;
         }
-        let char_width = self.char_width(window);
+        let char_width = self.char_width(window, cx);
+        let row_height = cx.global::<settings::Settings>().row_height();
         let item = self.active_item()?;
         let Source::Pr(_) = item.source else {
             return None;
@@ -4014,7 +4052,7 @@ impl ReviewApp {
         if !bounds.contains(&position) {
             return None;
         }
-        let (side, hit) = self.pane_hit(position, char_width, None)?;
+        let (side, hit) = self.pane_hit(position, char_width, row_height, None)?;
         let data = self.active_data()?;
         comment_anchor(&data.rows, hit.row, side).map(|_| (hit.row, side))
     }
@@ -4178,7 +4216,7 @@ impl ReviewApp {
                 match fetched {
                     Ok(comments) => {
                         data.comments = Some(group_comments(comments));
-                        data.rebuild_rows_anchored();
+                        data.rebuild_rows_anchored(cx.global::<settings::Settings>().row_height());
                     }
                     Err(err) => {
                         item.refresh_error =
@@ -4684,10 +4722,10 @@ impl ReviewApp {
             .h_full()
             .flex()
             .flex_col()
-            .bg(theme::mantle())
+            .bg(theme::surface())
             .border_l_1()
-            .border_color(theme::surface0())
-            .text_size(px(13.))
+            .border_color(theme::border())
+            .text_size(cx.global::<settings::Settings>().chrome(13.))
             // The chat input propagates Escape when it has nothing of its
             // own to dismiss: stop a streaming run, else return to the diff.
             .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
@@ -4699,7 +4737,7 @@ impl ReviewApp {
             return panel
                 .child(centered_message(
                     "open an item to chat about it".into(),
-                    theme::overlay0(),
+                    theme::text_subtle(),
                 ))
                 .into_any_element();
         };
@@ -4713,7 +4751,7 @@ impl ReviewApp {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(theme::surface0())
+            .border_color(theme::border())
             .child(
                 div()
                     .font_weight(gpui::FontWeight::BOLD)
@@ -4722,8 +4760,8 @@ impl ReviewApp {
             )
             .child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(theme::overlay0())
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from("claude")),
             )
             .child(div().flex_1());
@@ -4742,7 +4780,7 @@ impl ReviewApp {
         if chat.messages.is_empty() {
             column = column.child(
                 div()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from(
                         "Ask Claude about this diff. Select text in the diff to include it. ⌘⏎ sends.",
                     )),
@@ -4755,7 +4793,7 @@ impl ReviewApp {
                     let mut wrap = div().w_full().flex().flex_col().items_end().gap_1().child(
                         div()
                             .max_w(px(CHAT_WIDTH - 64.))
-                            .bg(theme::surface0())
+                            .bg(theme::element_bg())
                             .rounded_md()
                             .px_2()
                             .py_1()
@@ -4765,8 +4803,8 @@ impl ReviewApp {
                     if let Some(note) = &msg.note {
                         wrap = wrap.child(
                             div()
-                                .text_size(px(10.))
-                                .text_color(theme::overlay0())
+                                .text_size(cx.global::<settings::Settings>().chrome(10.))
+                                .text_color(theme::text_subtle())
                                 .truncate()
                                 .child(SharedString::from(note.clone())),
                         );
@@ -4780,14 +4818,14 @@ impl ReviewApp {
                     }
                     let mut wrap = div().w_full().min_w_0().flex().flex_col().gap_1().child(
                         div()
-                            .text_color(if msg.error { theme::red() } else { theme::text() })
+                            .text_color(if msg.error { theme::error() } else { theme::text() })
                             .child(SharedString::from(text)),
                     );
                     if let Some(cost) = msg.cost {
                         wrap = wrap.child(
                             div()
-                                .text_size(px(10.))
-                                .text_color(theme::overlay0())
+                                .text_size(cx.global::<settings::Settings>().chrome(10.))
+                                .text_color(theme::text_subtle())
                                 .child(SharedString::from(format!("${cost:.4}"))),
                         );
                     }
@@ -4795,6 +4833,7 @@ impl ReviewApp {
                 }
             }
         }
+        let row_height = px(cx.global::<settings::Settings>().row_height());
         let messages = div()
             .id("chat-messages")
             .flex_1()
@@ -4803,12 +4842,12 @@ impl ReviewApp {
             .track_scroll(&chat.scroll)
             // Stick-to-bottom the way editors do it: scrolling up unsticks,
             // scrolling back to (near) the bottom re-sticks.
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, _| {
                 let Some(data) = this.active_data_mut() else {
                     return;
                 };
                 let chat = &mut data.chat;
-                let dy = f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y);
+                let dy = f32::from(event.delta.pixel_delta(row_height).y);
                 if dy > 0. {
                     chat.stick_to_bottom = false;
                 } else {
@@ -4827,15 +4866,15 @@ impl ReviewApp {
             .p_2()
             .flex_shrink_0()
             .border_t_1()
-            .border_color(theme::surface0())
+            .border_color(theme::border())
             .flex()
             .flex_col()
             .gap_1();
         if let Some(hint) = sel_hint {
             input_area = input_area.child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(theme::blue())
+                    .text_size(cx.global::<settings::Settings>().chrome(10.))
+                    .text_color(theme::accent())
                     .truncate()
                     .child(SharedString::from(hint)),
             );
@@ -4845,8 +4884,8 @@ impl ReviewApp {
         }
         input_area = input_area.child(
             div()
-                .text_size(px(10.))
-                .text_color(theme::overlay0())
+                .text_size(cx.global::<settings::Settings>().chrome(10.))
+                .text_color(theme::text_subtle())
                 .child(SharedString::from(if chat.in_flight {
                     "streaming… esc to stop"
                 } else {
@@ -4892,8 +4931,9 @@ impl ReviewApp {
             (state.base_handle.bounds(), state.base_handle.offset())
         };
         // Pane-relative y of the hovered row; skip when scrolled out of view.
-        let y = row_ix as f32 * ROW_HEIGHT + f32::from(offset.y);
-        if y < 0. || y + ROW_HEIGHT > f32::from(bounds.size.height) {
+        let row_height = cx.global::<settings::Settings>().row_height();
+        let y = row_ix as f32 * row_height + f32::from(offset.y);
+        if y < 0. || y + row_height > f32::from(bounds.size.height) {
             return None;
         }
         let x = match (data.mode, side) {
@@ -4902,21 +4942,28 @@ impl ReviewApp {
             }
             _ => 2.,
         };
+        // Source the button colors from the theme's primary role — the same
+        // one gpui-component's real `.primary()` buttons use — rather than the
+        // raw `blue()` accent, so the "+" reads as an actual primary button.
+        let (btn_bg, btn_fg) = {
+            let t = cx.theme();
+            (t.primary, t.primary_foreground)
+        };
         let entity = cx.entity();
         Some(
             div()
                 .absolute()
                 .left(px(x))
-                .top(px(y + (ROW_HEIGHT - 16.) / 2.))
+                .top(px(y + (row_height - 16.) / 2.))
                 .w(px(16.))
                 .h(px(16.))
                 .rounded_sm()
-                .bg(theme::blue())
+                .bg(btn_bg)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(gpui::white())
-                .text_size(px(13.))
+                .text_color(btn_fg)
+                .text_size(cx.global::<settings::Settings>().chrome(13.))
                 .cursor_pointer()
                 .child(SharedString::from("+"))
                 .on_mouse_down(
@@ -4952,11 +4999,21 @@ impl ReviewApp {
             let state = data.scroll.0.borrow();
             (state.base_handle.bounds(), state.base_handle.offset())
         };
+        let row_height = cx.global::<settings::Settings>().row_height();
         let pane_h = f32::from(bounds.size.height);
-        let row_y = composer.row_ix as f32 * ROW_HEIGHT + f32::from(offset.y);
-        let y = f32::from(bounds.top()) + (row_y + ROW_HEIGHT).clamp(8., (pane_h - 250.).max(8.));
-        let x = (f32::from(bounds.left()) + 72.)
-            .min((f32::from(bounds.right()) - 528.).max(8.));
+        let row_y = composer.row_ix as f32 * row_height + f32::from(offset.y);
+        let y = f32::from(bounds.top()) + (row_y + row_height).clamp(8., (pane_h - 250.).max(8.));
+        // Anchor to the panel the comment targets: right split rows start
+        // past the left half and divider, mirroring render_plus.
+        let base_x = if data.mode == ViewMode::Split && composer.side == CommentSide::Right {
+            f32::from(bounds.left())
+                + (f32::from(bounds.size.width) - SPLIT_DIVIDER) / 2.
+                + SPLIT_DIVIDER
+                + SPLIT_GUTTER
+        } else {
+            f32::from(bounds.left()) + 72.
+        };
+        let x = base_x.min((f32::from(bounds.right()) - 528.).max(8.));
         let action = if composer.reply_to.is_some() {
             "Reply"
         } else {
@@ -4983,23 +5040,23 @@ impl ReviewApp {
             }))
             .rounded_lg()
             .border_1()
-            .border_color(theme::surface0())
-            .bg(theme::mantle())
+            .border_color(theme::border())
+            .bg(theme::surface())
             .shadow_lg()
             .p_2()
             .flex()
             .flex_col()
             .gap_2()
-            .text_size(px(12.))
+            .text_size(cx.global::<settings::Settings>().chrome(12.))
             .child(
                 div()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .truncate()
                     .child(SharedString::from(target)),
             )
             .child(Input::new(&composer.input))
             .when_some(composer.error.clone(), |card, err| {
-                card.child(div().text_color(theme::red()).child(err))
+                card.child(div().text_color(theme::error()).child(err))
             })
             .child(
                 div()
@@ -5009,8 +5066,8 @@ impl ReviewApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.))
-                            .text_color(theme::overlay0())
+                            .text_size(cx.global::<settings::Settings>().chrome(11.))
+                            .text_color(theme::text_subtle())
                             .child(SharedString::from("⌘⏎ to submit")),
                     )
                     .child(
@@ -5066,9 +5123,9 @@ impl ReviewApp {
                         .text_color(color)
                 })
                 .when(verdict != selected, |opt| {
-                    opt.border_color(theme::surface0())
-                        .text_color(theme::subtext())
-                        .hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+                    opt.border_color(theme::border())
+                        .text_color(theme::text_muted())
+                        .hover(|style| style.bg(Hsla::from(theme::element_bg()).opacity(0.5)))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(review) = &mut this.review {
@@ -5092,7 +5149,7 @@ impl ReviewApp {
             .flex_col()
             .items_center()
             .pt(px(120.))
-            .bg(theme::palette_backdrop())
+            .bg(theme::palette_backdrop(&theme::active()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5111,17 +5168,17 @@ impl ReviewApp {
                     }))
                     .rounded_lg()
                     .border_1()
-                    .border_color(theme::surface0())
-                    .bg(theme::mantle())
+                    .border_color(theme::border())
+                    .bg(theme::surface())
                     .shadow_lg()
                     .p_3()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_size(px(12.))
+                    .text_size(cx.global::<settings::Settings>().chrome(12.))
                     .child(
                         div()
-                            .text_color(theme::overlay0())
+                            .text_color(theme::text_subtle())
                             .child(SharedString::from("Finish your review")),
                     )
                     .child(
@@ -5129,17 +5186,17 @@ impl ReviewApp {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(verdict_option("approve", gh::ReviewVerdict::Approve, theme::green()))
+                            .child(verdict_option("approve", gh::ReviewVerdict::Approve, theme::success()))
                             .child(verdict_option(
                                 "request changes",
                                 gh::ReviewVerdict::RequestChanges,
-                                theme::red(),
+                                theme::error(),
                             ))
-                            .child(verdict_option("comment", gh::ReviewVerdict::Comment, theme::blue())),
+                            .child(verdict_option("comment", gh::ReviewVerdict::Comment, theme::accent())),
                     )
                     .child(Input::new(&review.input))
                     .when_some(review.error.clone(), |card, err| {
-                        card.child(div().text_color(theme::red()).child(err))
+                        card.child(div().text_color(theme::error()).child(err))
                     })
                     .child(
                         div()
@@ -5149,8 +5206,8 @@ impl ReviewApp {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(11.))
-                                    .text_color(theme::overlay0())
+                                    .text_size(cx.global::<settings::Settings>().chrome(11.))
+                                    .text_color(theme::text_subtle())
                                     .child(SharedString::from("⌘⏎ to submit")),
                             )
                             .child(
@@ -5188,9 +5245,9 @@ impl ReviewApp {
             .w(px(MINIMAP_WIDTH))
             .h_full()
             .flex_shrink_0()
-            .bg(Hsla::from(theme::crust()).opacity(0.5))
+            .bg(Hsla::from(theme::background()).opacity(0.5))
             .border_l_1()
-            .border_color(theme::surface0())
+            .border_color(theme::border())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -5232,13 +5289,13 @@ impl ReviewApp {
                             // Full alpha-ish tints: these are 1-3px bars and
                             // need punch, unlike the row backgrounds.
                             let color: Hsla = match run.color {
-                                MinimapColor::Added => Hsla::from(theme::green()).opacity(0.8),
-                                MinimapColor::Removed => Hsla::from(theme::red()).opacity(0.8),
+                                MinimapColor::Added => Hsla::from(theme::created()).opacity(0.8),
+                                MinimapColor::Removed => Hsla::from(theme::deleted()).opacity(0.8),
                                 MinimapColor::Context => {
-                                    Hsla::from(theme::overlay0()).opacity(0.35)
+                                    Hsla::from(theme::text_subtle()).opacity(0.35)
                                 }
-                                MinimapColor::Header => Hsla::from(theme::blue()).opacity(0.5),
-                                MinimapColor::Gap => Hsla::from(theme::overlay0()).opacity(0.2),
+                                MinimapColor::Header => Hsla::from(theme::accent()).opacity(0.5),
+                                MinimapColor::Gap => Hsla::from(theme::text_subtle()).opacity(0.2),
                             };
                             window.paint_quad(fill(
                                 Bounds::new(
@@ -5251,9 +5308,10 @@ impl ReviewApp {
                         // Viewport indicator — the only per-frame math.
                         let offset_y =
                             f32::from(-data.scroll.0.borrow().base_handle.offset().y);
+                        let row_height = cx.global::<settings::Settings>().row_height();
                         let px_per_row = layout.slot_h / layout.group as f32;
-                        let top_row = offset_y / ROW_HEIGHT;
-                        let visible = (pane_h / ROW_HEIGHT).min(total as f32 - top_row);
+                        let top_row = offset_y / row_height;
+                        let visible = (pane_h / row_height).min(total as f32 - top_row);
                         let vy = top_row * px_per_row;
                         let vh = (visible * px_per_row).max(3.);
                         window.paint_quad(
@@ -5265,7 +5323,7 @@ impl ReviewApp {
                                 Hsla::from(theme::text()).opacity(0.08),
                             )
                             .border_widths(1.)
-                            .border_color(Hsla::from(theme::overlay0()).opacity(0.4)),
+                            .border_color(Hsla::from(theme::text_subtle()).opacity(0.4)),
                         );
                     },
                 )
@@ -5299,14 +5357,14 @@ impl ReviewApp {
             }
         });
         TitleBar::new()
-            .text_size(px(13.))
+            .text_size(cx.global::<settings::Settings>().chrome(13.))
             .child(content)
             .when_some(note, |bar, note| {
                 bar.child(
                     div()
                         .max_w(px(280.))
                         .truncate()
-                        .text_color(theme::overlay0())
+                        .text_color(theme::text_subtle())
                         .pr_3()
                         .child(note),
                 )
@@ -5331,28 +5389,28 @@ impl ReviewApp {
                     .items_center()
                     .gap_1()
                     .flex_shrink_0()
-                    .text_size(px(11.))
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
                     .child(
                         div()
-                            .text_color(theme::green())
+                            .text_color(theme::created())
                             .child(SharedString::from(format!("+{}", data.additions))),
                     )
                     .child(
                         div()
-                            .text_color(theme::red())
+                            .text_color(theme::deleted())
                             .child(SharedString::from(format!("−{}", data.deletions))),
                     )
                     .into_any_element(),
                 ItemState::Loading => div()
                     .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(theme::overlay0())
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from("loading…"))
                     .into_any_element(),
                 ItemState::Failed(_) => div()
                     .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(theme::red())
+                    .text_size(cx.global::<settings::Settings>().chrome(11.))
+                    .text_color(theme::error())
                     .child(SharedString::from("failed"))
                     .into_any_element(),
             };
@@ -5365,9 +5423,9 @@ impl ReviewApp {
                 .py_1()
                 .rounded_md()
                 .cursor_pointer()
-                .when(active, |entry| entry.bg(theme::surface0()))
+                .when(active, |entry| entry.bg(theme::element_bg()))
                 .when(!active, |entry| {
-                    entry.hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+                    entry.hover(|style| style.bg(Hsla::from(theme::element_bg()).opacity(0.5)))
                 })
                 .on_click(cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)))
                 .child(
@@ -5413,8 +5471,8 @@ impl ReviewApp {
                         div()
                             .pl(px(16.))
                             .truncate()
-                            .text_size(px(11.))
-                            .text_color(theme::subtext())
+                            .text_size(cx.global::<settings::Settings>().chrome(11.))
+                            .text_color(theme::text_muted())
                             .child(secondary),
                     )
                 });
@@ -5442,13 +5500,14 @@ impl ReviewApp {
             // Follow the diff: highlight the file whose header row is at (or
             // scrolled past) the top of the viewport. A pending scroll_to_item
             // (from ]/[ or a tree click) hasn't reached the offset yet, so it
-            // takes precedence; otherwise the same offset/ROW_HEIGHT math the
+            // takes precedence; otherwise the same offset/row_height math the
             // selection hit test uses.
             let scroll = data.scroll.0.borrow();
+            let row_height = cx.global::<settings::Settings>().row_height();
             let top_row = match &scroll.deferred_scroll_to_item {
                 Some(deferred) => deferred.item_index,
                 None => {
-                    (f32::from(-scroll.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize
+                    (f32::from(-scroll.base_handle.offset().y) / row_height).max(0.) as usize
                 }
             };
             drop(scroll);
@@ -5477,6 +5536,8 @@ impl ReviewApp {
         }
         let tree_scroll = self.active_data().map(|data| data.tree_scroll.clone());
         let entity = cx.entity();
+        let stats_text_size = cx.global::<settings::Settings>().chrome(10.);
+        let tree_row_height = cx.global::<settings::Settings>().chrome(TREE_ROW_HEIGHT);
         let tree_list: gpui::AnyElement = match tree_scroll {
             Some(scroll) if !tree_rows.is_empty() => {
                 uniform_list("file-tree", tree_rows.len(), move |range, _window, cx| {
@@ -5487,7 +5548,15 @@ impl ReviewApp {
                     range
                         .filter_map(|pos| tree_rows.get(pos).map(|row| (pos, *row)))
                         .map(|(pos, row)| {
-                            render_tree_row(row, pos, current_row == Some(pos), data, &entity)
+                            render_tree_row(
+                                row,
+                                pos,
+                                current_row == Some(pos),
+                                data,
+                                &entity,
+                                stats_text_size,
+                                tree_row_height,
+                            )
                         })
                         .collect()
                 })
@@ -5498,7 +5567,7 @@ impl ReviewApp {
             Some(_) if !query.is_empty() => div()
                 .px_3()
                 .py_2()
-                .text_color(theme::overlay0())
+                .text_color(theme::text_subtle())
                 .child(SharedString::from("no matching files"))
                 .into_any_element(),
             _ => div().into_any_element(),
@@ -5510,10 +5579,10 @@ impl ReviewApp {
             .h_full()
             .flex()
             .flex_col()
-            .bg(theme::mantle())
+            .bg(theme::surface())
             .border_r_1()
-            .border_color(theme::surface0())
-            .text_size(px(12.))
+            .border_color(theme::border())
+            .text_size(cx.global::<settings::Settings>().chrome(12.))
             .child(
                 div()
                     .p_2()
@@ -5524,14 +5593,14 @@ impl ReviewApp {
                     .when_some(self.open_error.clone(), |area, err| {
                         area.child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(theme::red())
+                                .text_size(cx.global::<settings::Settings>().chrome(11.))
+                                .text_color(theme::error())
                                 .child(err),
                         )
                     }),
             )
             .child(list)
-            .child(div().h(px(1.)).flex_shrink_0().bg(theme::surface0()))
+            .child(div().h(px(1.)).flex_shrink_0().bg(theme::border()))
             .child(
                 div()
                     .flex_1()
@@ -5557,6 +5626,7 @@ impl ReviewApp {
             return div().into_any_element();
         };
         let query = self.palette_input.read(cx).value().to_string();
+        let palette_row_height = cx.global::<settings::Settings>().chrome(PALETTE_ROW_HEIGHT);
 
         let header: Option<SharedString> = match step {
             PaletteStep::Sources { .. } => None,
@@ -5574,7 +5644,7 @@ impl ReviewApp {
                         div()
                             .px_3()
                             .py_2()
-                            .text_color(theme::overlay0())
+                            .text_color(theme::text_subtle())
                             .child(SharedString::from("no matches")),
                     );
                 }
@@ -5584,15 +5654,15 @@ impl ReviewApp {
                             .id(("palette-source", opt))
                             .mx_1()
                             .px_2()
-                            .h(px(PALETTE_ROW_HEIGHT))
+                            .h(palette_row_height)
                             .rounded_md()
                             .flex()
                             .items_center()
                             .cursor_pointer()
-                            .when(pos == selected, |row| row.bg(theme::surface0()))
+                            .when(pos == selected, |row| row.bg(theme::element_bg()))
                             .when(pos != selected, |row| {
                                 row.hover(|style| {
-                                    style.bg(Hsla::from(theme::surface0()).opacity(0.5))
+                                    style.bg(Hsla::from(theme::element_bg()).opacity(0.5))
                                 })
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -5609,10 +5679,10 @@ impl ReviewApp {
             }
             PaletteStep::RepoInput { error } => {
                 let (text, color): (SharedString, gpui::Rgba) = match error {
-                    Some(err) => (err.clone(), theme::red()),
+                    Some(err) => (err.clone(), theme::error()),
                     None => (
                         "enter to list open pull requests · esc to go back".into(),
-                        theme::overlay0(),
+                        theme::text_subtle(),
                     ),
                 };
                 div()
@@ -5626,19 +5696,19 @@ impl ReviewApp {
                 PrListState::Loading => div()
                     .px_3()
                     .py_2()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from("loading pull requests…"))
                     .into_any_element(),
                 PrListState::Failed(msg) => div()
                     .px_3()
                     .py_2()
-                    .text_color(theme::red())
+                    .text_color(theme::error())
                     .child(SharedString::from(msg.clone()))
                     .into_any_element(),
                 PrListState::Loaded { filtered, .. } if filtered.is_empty() => div()
                     .px_3()
                     .py_2()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from("no matching pull requests"))
                     .into_any_element(),
                 PrListState::Loaded { filtered, .. } => {
@@ -5646,7 +5716,7 @@ impl ReviewApp {
                     let count = filtered.len();
                     div()
                         .py_1()
-                        .h(px(count.min(10) as f32 * PALETTE_ROW_HEIGHT + 8.))
+                        .h(palette_row_height * (count.min(10) as f32) + px(8.))
                         .child(
                             uniform_list("palette-prs", count, move |range, _window, cx| {
                                 let this = entity.read(cx);
@@ -5660,7 +5730,13 @@ impl ReviewApp {
                                 range
                                     .filter_map(|pos| Some((pos, &all[*filtered.get(pos)?])))
                                     .map(|(pos, pr)| {
-                                        palette_pr_row(pr, pos, pos == *selected, entity.clone())
+                                        palette_pr_row(
+                                            pr,
+                                            pos,
+                                            pos == *selected,
+                                            entity.clone(),
+                                            palette_row_height,
+                                        )
                                     })
                                     .collect()
                             })
@@ -5683,7 +5759,7 @@ impl ReviewApp {
             .flex_col()
             .items_center()
             .pt(px(120.))
-            .bg(theme::palette_backdrop())
+            .bg(theme::palette_backdrop(&theme::active()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5713,10 +5789,10 @@ impl ReviewApp {
                     .w(px(560.))
                     .rounded_lg()
                     .border_1()
-                    .border_color(theme::surface0())
-                    .bg(theme::mantle())
+                    .border_color(theme::border())
+                    .bg(theme::surface())
                     .shadow_lg()
-                    .text_size(px(13.))
+                    .text_size(cx.global::<settings::Settings>().chrome(13.))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -5725,8 +5801,8 @@ impl ReviewApp {
                             div()
                                 .px_3()
                                 .pt_2()
-                                .text_size(px(11.))
-                                .text_color(theme::overlay0())
+                                .text_size(cx.global::<settings::Settings>().chrome(11.))
+                                .text_color(theme::text_subtle())
                                 .child(header),
                         )
                     })
@@ -5734,7 +5810,7 @@ impl ReviewApp {
                         div()
                             .p_2()
                             .border_b_1()
-                            .border_color(theme::surface0())
+                            .border_color(theme::border())
                             .child(Input::new(&self.palette_input).small()),
                     )
                     .child(body),
@@ -5742,7 +5818,7 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    fn render_footer(&self) -> impl IntoElement {
+    fn render_footer(&self, text_size: Pixels, height: Pixels) -> impl IntoElement {
         let hint = |keys: &[&str], label: &'static str| {
             let mut hint = div().flex().items_center().gap_1();
             for key in keys {
@@ -5750,21 +5826,21 @@ impl ReviewApp {
             }
             hint.child(
                 div()
-                    .text_color(theme::overlay0())
+                    .text_color(theme::text_subtle())
                     .child(SharedString::from(label)),
             )
         };
         div()
-            .h(px(28.))
+            .h(height)
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap_4()
             .px_3()
-            .bg(theme::mantle())
+            .bg(theme::surface())
             .border_t_1()
-            .border_color(theme::surface0())
-            .text_size(px(12.))
+            .border_color(theme::border())
+            .text_size(text_size)
             .child(hint(&["]", "["], "files"))
             .child(hint(&["n", "p"], "hunks"))
             .child(hint(&["v"], "unified/split"))
@@ -5778,16 +5854,19 @@ impl ReviewApp {
             .child(hint(&["cmd-j"], "chat"))
             .child(hint(&["r"], "refresh"))
             .child(hint(&["cmd-enter"], "review"))
+            .child(hint(&["cmd-,"], "settings"))
     }
 }
 
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let ui_font = cx.global::<settings::Settings>().ui_font.clone();
+        let row_height_px = px(cx.global::<settings::Settings>().row_height());
         let pane: gpui::AnyElement = match self.active_item() {
-            None => centered_message("⌘T to open a PR or path".into(), theme::overlay0()),
+            None => centered_message("⌘T to open a PR or path".into(), theme::text_subtle()),
             Some(item) => match &item.state {
-                ItemState::Loading => centered_message("loading…".into(), theme::overlay0()),
+                ItemState::Loading => centered_message("loading…".into(), theme::text_subtle()),
                 ItemState::Failed(msg) => div()
                     .size_full()
                     .flex()
@@ -5797,7 +5876,7 @@ impl Render for ReviewApp {
                     .child(
                         div()
                             .max_w(px(720.))
-                            .text_color(theme::red())
+                            .text_color(theme::error())
                             .child(SharedString::from(msg.clone())),
                     )
                     .into_any_element(),
@@ -5805,9 +5884,11 @@ impl Render for ReviewApp {
                     .size_full()
                     .relative()
                     .flex()
-                    .font_family(MONO)
-                    .text_size(px(TEXT_SIZE))
-                    .line_height(px(ROW_HEIGHT))
+                    .font_family(SharedString::from(
+                        cx.global::<settings::Settings>().code_font.clone(),
+                    ))
+                    .text_size(px(cx.global::<settings::Settings>().font_size))
+                    .line_height(row_height_px)
                     // Selection mouse listeners live on the diff pane only.
                     // While the palette is open its occluding backdrop keeps
                     // this hitbox from being hovered, so none of these fire;
@@ -5821,8 +5902,10 @@ impl Render for ReviewApp {
                                 return;
                             }
                             window.focus(&this.focus_handle);
-                            let char_width = this.char_width(window);
-                            this.drag_anchor = this.pane_hit(event.position, char_width, None);
+                            let char_width = this.char_width(window, cx);
+                            let row_height = cx.global::<settings::Settings>().row_height();
+                            this.drag_anchor =
+                                this.pane_hit(event.position, char_width, row_height, None);
                             // A plain click clears; a selection only appears
                             // once the drag covers ≥ 1 char.
                             if let Some(data) = this.active_data_mut() {
@@ -5846,8 +5929,10 @@ impl Render for ReviewApp {
                         let Some((side, anchor)) = this.drag_anchor else {
                             return;
                         };
-                        let char_width = this.char_width(window);
-                        let Some((_, head)) = this.pane_hit(event.position, char_width, Some(side))
+                        let char_width = this.char_width(window, cx);
+                        let row_height = cx.global::<settings::Settings>().row_height();
+                        let Some((_, head)) =
+                            this.pane_hit(event.position, char_width, row_height, Some(side))
                         else {
                             return;
                         };
@@ -5878,6 +5963,10 @@ impl Render for ReviewApp {
                     .child(
                         uniform_list("diff", data.rows.len(), move |range, _window, cx| {
                             let this = entity.read(cx);
+                            let active_theme =
+                                theme::active();
+                            let row_height = px(cx.global::<settings::Settings>().row_height());
+                            let meta_text_size = cx.global::<settings::Settings>().chrome(11.);
                             match this.active_data() {
                                 Some(data) => {
                                     let sel = data.selection;
@@ -5889,7 +5978,10 @@ impl Render for ReviewApp {
                                                     .filter(|range| !range.is_empty())
                                                     .map(|range| (sel.side, range))
                                             });
-                                            render_row(ix, row, row_sel, &entity)
+                                            render_row(
+                                                ix, row, row_sel, &entity, &active_theme,
+                                                row_height, meta_text_size,
+                                            )
                                         })
                                         .collect()
                                 }
@@ -5923,14 +6015,144 @@ impl Render for ReviewApp {
             .relative()
             .flex()
             .flex_col()
-            .bg(theme::base())
+            .bg(theme::editor_bg())
             .text_color(theme::text())
+            .when_some(ui_font, |root, f| root.font_family(SharedString::from(f)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else {
                     this.open_palette(window, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                // Second cmd-, toggles the modal closed without mutating any
+                // setting.
+                if this.settings.is_some() {
+                    this.settings = None;
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                    return;
+                }
+                let s = cx.global::<settings::Settings>().clone();
+
+                // Font dropdowns, preselected to the active UI / code fonts.
+                let font_names: Vec<SharedString> =
+                    settings_ui::all_font_names(cx).into_iter().map(SharedString::from).collect();
+                let ui_ix = s
+                    .ui_font
+                    .as_ref()
+                    .and_then(|f| font_names.iter().position(|n| n.as_ref() == f))
+                    .map(IndexPath::new);
+                let code_ix = font_names
+                    .iter()
+                    .position(|n| n.as_ref() == s.code_font)
+                    .map(IndexPath::new);
+                let ui_font_select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(font_names.clone()), ui_ix, window, cx)
+                        .searchable(true)
+                });
+                let code_font_select = cx.new(|cx| {
+                    SelectState::new(SearchableVec::new(font_names), code_ix, window, cx)
+                        .searchable(true)
+                });
+
+                // Each confirmed font selection updates the global setting and
+                // applies + persists it live. (Theme uses a hover-preview list
+                // in render_settings, not a dropdown.)
+                let subs = vec![
+                    cx.subscribe_in(
+                        &ui_font_select,
+                        window,
+                        |this,
+                         _,
+                         ev: &SelectEvent<SearchableVec<SharedString>>,
+                         window,
+                         cx| {
+                            if let SelectEvent::Confirm(Some(name)) = ev {
+                                let name = name.to_string();
+                                cx.update_global::<settings::Settings, _>(|s, _| {
+                                    s.ui_font = Some(name.clone())
+                                });
+                                settings_ui::apply_and_save(this, window, cx);
+                            }
+                        },
+                    ),
+                    cx.subscribe_in(
+                        &code_font_select,
+                        window,
+                        |this,
+                         _,
+                         ev: &SelectEvent<SearchableVec<SharedString>>,
+                         window,
+                         cx| {
+                            if let SelectEvent::Confirm(Some(name)) = ev {
+                                let name = name.to_string();
+                                cx.update_global::<settings::Settings, _>(|s, _| {
+                                    s.code_font = name.clone()
+                                });
+                                settings_ui::apply_and_save(this, window, cx);
+                            }
+                        },
+                    ),
+                ];
+
+                let focus_handle = cx.focus_handle();
+                window.focus(&focus_handle);
+                // Seed the picker synchronously (embedded default + active
+                // theme) so it's never empty; the background scan fills in
+                // disk themes and flips the state to Ready.
+                let seed = theme::ThemeRegistry::seeded(theme::active());
+                // Keyboard cursor starts on the active (resolved) theme's row
+                // in the seeded registry.
+                let active_theme = s.theme_name.clone();
+                let theme_cursor = seed
+                    .names()
+                    .iter()
+                    .position(|n| *n == active_theme)
+                    .unwrap_or(0);
+                // Offload the blocking filesystem scan + JSON parse to a
+                // background thread, then merge the results back into the
+                // (still-open) modal's registry and mark discovery Ready.
+                // Not detached: the returned Task is stored on SettingsUi, so
+                // closing the modal (settings = None) cancels the scan.
+                let discovery_task = cx.spawn_in(window, async move |this, cx| {
+                    let found = cx.background_spawn(async move { theme::discover() }).await;
+                    this.update(cx, |app, cx| {
+                        if let Some(ui) = &mut app.settings {
+                            let reg = match std::mem::replace(
+                                &mut ui.discovery,
+                                settings_ui::Discovery::Loading(theme::ThemeRegistry::seeded(
+                                    theme::active(),
+                                )),
+                            ) {
+                                settings_ui::Discovery::Loading(mut r)
+                                | settings_ui::Discovery::Ready(mut r) => {
+                                    r.merge(found);
+                                    r
+                                }
+                            };
+                            ui.discovery = settings_ui::Discovery::Ready(reg);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                });
+                this.settings = Some(settings_ui::SettingsUi {
+                    focus_handle,
+                    // Seed from the raw persisted `s.theme_name`: we preserve the
+                    // user's chosen name verbatim (even if it isn't on disk right
+                    // now) so it re-binds when the theme reappears, rather than
+                    // snapping to a canonical/resolved name.
+                    baseline_theme: active_theme.to_string(),
+                    theme_cursor,
+                    ui_font_select,
+                    code_font_select,
+                    discovery: settings_ui::Discovery::Loading(seed),
+                    _discovery_task: discovery_task,
+                    _subs: subs,
+                });
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| {
                 let targets = this.active_data().map(|d| d.file_rows.clone()).unwrap_or_default();
@@ -5978,7 +6200,7 @@ impl Render for ReviewApp {
                 if event.dragging() {
                     return;
                 }
-                let hover = this.hover_target(event.position, window);
+                let hover = this.hover_target(event.position, window, cx);
                 if this.hover_plus != hover {
                     this.hover_plus = hover;
                     cx.notify();
@@ -6074,7 +6296,10 @@ impl Render for ReviewApp {
                         main.child(self.render_chat(window, cx))
                     }),
             )
-            .child(self.render_footer())
+            .child(self.render_footer(
+                cx.global::<settings::Settings>().chrome(12.),
+                cx.global::<settings::Settings>().chrome(28.),
+            ))
             // Root-level so the composer's input escapes the "ReviewApp" key
             // context (plain letters must stay text, like the palette input).
             .when(self.composer.is_some(), |root| {
@@ -6085,6 +6310,9 @@ impl Render for ReviewApp {
             })
             .when(self.palette.is_some(), |root| {
                 root.child(self.render_palette(cx))
+            })
+            .when(self.settings.is_some(), |root| {
+                root.child(self.render_settings(window, cx))
             })
     }
 }
@@ -6390,13 +6618,17 @@ mod tests {
 
     use syntax::Token;
 
+    fn mocha_theme() -> theme::Theme {
+        theme::embedded_mocha()
+    }
+
     fn style(token: Token) -> HighlightStyle {
-        theme::token_style(token)
+        theme::token_style(&mocha_theme(), token)
     }
 
     fn style_bg(token: Option<Token>) -> HighlightStyle {
         let mut style = token.map(style).unwrap_or_default();
-        style.background_color = Some(theme::added_word_bg().into());
+        style.background_color = Some(theme::added_word_bg(&mocha_theme()).into());
         style
     }
 
@@ -6404,26 +6636,26 @@ mod tests {
     fn merge_syntax_only() {
         let syntax = [(0..2, Token::Keyword), (3..7, Token::Function)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..2, style(Token::Keyword)), (3..7, style(Token::Function))]
         );
     }
 
     #[test]
     fn merge_intra_only() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         assert_eq!(
-            merge_highlights(&[], &[2..5], bg, None),
+            merge_highlights(&[], &[2..5], bg, None, &mocha_theme()),
             vec![(2..5, style_bg(None))]
         );
     }
 
     #[test]
     fn merge_partial_overlap() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let syntax = [(0..6, Token::String)];
         assert_eq!(
-            merge_highlights(&syntax, &[4..8], bg, None),
+            merge_highlights(&syntax, &[4..8], bg, None, &mocha_theme()),
             vec![
                 (0..4, style(Token::String)),
                 (4..6, style_bg(Some(Token::String))),
@@ -6434,10 +6666,10 @@ mod tests {
 
     #[test]
     fn merge_intra_spanning_multiple_tokens() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let syntax = [(0..3, Token::Keyword), (5..8, Token::Number)];
         assert_eq!(
-            merge_highlights(&syntax, &[1..7], bg, None),
+            merge_highlights(&syntax, &[1..7], bg, None, &mocha_theme()),
             vec![
                 (0..1, style(Token::Keyword)),
                 (1..3, style_bg(Some(Token::Keyword))),
@@ -6454,17 +6686,17 @@ mod tests {
         // stay split exactly at the boundary.
         let syntax = [(0..2, Token::Keyword), (2..4, Token::Keyword)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..4, style(Token::Keyword))]
         );
         let syntax = [(0..2, Token::Keyword), (2..4, Token::Type)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, None),
+            merge_highlights(&syntax, &[], None, None, &mocha_theme()),
             vec![(0..2, style(Token::Keyword)), (2..4, style(Token::Type))]
         );
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         assert_eq!(
-            merge_highlights(&[], &[0..2, 2..4], bg, None),
+            merge_highlights(&[], &[0..2, 2..4], bg, None, &mocha_theme()),
             vec![(0..4, style_bg(None))]
         );
     }
@@ -6660,17 +6892,17 @@ mod tests {
 
     #[test]
     fn status_style_matches_file_header_tags() {
-        assert_eq!(status_style(FileStatus::Added), ("added", theme::green()));
-        assert_eq!(status_style(FileStatus::Deleted), ("deleted", theme::red()));
+        assert_eq!(status_style(FileStatus::Added), ("added", theme::created()));
+        assert_eq!(status_style(FileStatus::Deleted), ("deleted", theme::deleted()));
         assert_eq!(
             status_style(FileStatus::Modified),
-            ("modified", theme::blue())
+            ("modified", theme::modified())
         );
         assert_eq!(
             status_style(FileStatus::Renamed),
-            ("renamed", theme::mauve())
+            ("renamed", theme::accent())
         );
-        assert_eq!(status_style(FileStatus::Binary), ("binary", theme::peach()));
+        assert_eq!(status_style(FileStatus::Binary), ("binary", theme::warning()));
     }
 
     #[test]
@@ -7555,21 +7787,21 @@ mod tests {
 
     #[test]
     fn merge_selection_wins_over_intra() {
-        let bg = Some(theme::added_word_bg());
+        let bg = Some(theme::added_word_bg(&mocha_theme()));
         let sel_style = |token: Option<Token>| {
             let mut style = token.map(style).unwrap_or_default();
-            style.background_color = Some(theme::selection_bg().into());
+            style.background_color = Some(theme::selection_bg(&mocha_theme()).into());
             style
         };
         // Intra 2..6, selection 4..8: the overlap 4..6 paints selection bg.
         assert_eq!(
-            merge_highlights(&[], &[2..6], bg, Some(4..8)),
+            merge_highlights(&[], &[2..6], bg, Some(4..8), &mocha_theme()),
             vec![(2..4, style_bg(None)), (4..8, sel_style(None))]
         );
         // Selection over a syntax token keeps the token foreground.
         let syntax = [(0..4, Token::Keyword)];
         assert_eq!(
-            merge_highlights(&syntax, &[], None, Some(2..6)),
+            merge_highlights(&syntax, &[], None, Some(2..6), &mocha_theme()),
             vec![
                 (0..2, style(Token::Keyword)),
                 (2..4, sel_style(Some(Token::Keyword))),

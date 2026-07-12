@@ -10,7 +10,7 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 /// Semantic token classes, deliberately coarse: capture names from each
 /// grammar's bundled highlight query are folded onto these via longest-prefix
 /// matching (tree-sitter-highlight's own resolution rule).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Token {
     Keyword,
     Function,
@@ -41,11 +41,14 @@ const CAPTURES: &[(&str, Token)] = &[
     ("boolean", Token::Constant),
     ("charset", Token::Keyword),
     ("comment", Token::Comment),
+    ("conditional", Token::Keyword),
     ("constant", Token::Constant),
     ("constructor", Token::Type),
     ("delimiter", Token::Punctuation),
     ("embedded", Token::Embedded),
     ("escape", Token::Constant),
+    ("field", Token::Property),
+    ("float", Token::Number),
     ("function", Token::Function),
     ("import", Token::Keyword),
     ("keyframes", Token::Keyword),
@@ -245,14 +248,7 @@ static CPP: Language = Language::new(|| {
         tree_sitter_cpp::HIGHLIGHT_QUERY,
         tree_sitter_c::HIGHLIGHT_QUERY
     );
-    HighlightConfiguration::new(
-        tree_sitter_cpp::LANGUAGE.into(),
-        "cpp",
-        &highlights,
-        "",
-        "",
-    )
-    .ok()
+    HighlightConfiguration::new(tree_sitter_cpp::LANGUAGE.into(), "cpp", &highlights, "", "").ok()
 });
 
 static JAVA: Language = Language::new(|| {
@@ -343,6 +339,36 @@ static CSS: Language = Language::new(|| {
     .ok()
 });
 
+static SQL: Language = Language::new(|| {
+    // tree-sitter-sequel tags comments `@comment @spell`. The `@spell` capture
+    // (a Neovim spellcheck hint we don't map) otherwise wins for `--` line
+    // comments and drops them to plain text; strip it so `@comment` stands.
+    // Numeric literals share the `string` color: the grammar uses one `literal`
+    // node for strings and numbers, disambiguated only by `#match?` predicates,
+    // which tree-sitter-highlight does not evaluate.
+    let highlights = tree_sitter_sequel::HIGHLIGHTS_QUERY.replace(" @spell", "");
+    HighlightConfiguration::new(
+        tree_sitter_sequel::LANGUAGE.into(),
+        "sql",
+        &highlights,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// The tree-sitter-graphql crate ships no highlight query, so we bundle one.
+static GRAPHQL: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_graphql::LANGUAGE.into(),
+        "graphql",
+        include_str!("../queries/graphql/highlights.scm"),
+        "",
+        "",
+    )
+    .ok()
+});
+
 /// Resolve a language from a path's extension. `None` means "render plain".
 pub fn language_for_path(path: &str) -> Option<&'static Language> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -367,6 +393,8 @@ pub fn language_for_path(path: &str) -> Option<&'static Language> {
         "yml" | "yaml" => &YAML,
         "html" | "htm" => &HTML,
         "css" => &CSS,
+        "sql" => &SQL,
+        "graphql" | "gql" => &GRAPHQL,
         _ => return None,
     };
     Some(lang)
@@ -393,7 +421,11 @@ pub fn highlight_lines(lang: &Language, source: &str) -> Vec<Vec<(Range<usize>, 
         return out;
     };
     // End of a line's content (its newline excluded).
-    let line_end = |l: usize| line_starts.get(l + 1).map_or(source.len(), |&next| next - 1);
+    let line_end = |l: usize| {
+        line_starts
+            .get(l + 1)
+            .map_or(source.len(), |&next| next - 1)
+    };
 
     let mut stack: Vec<Token> = Vec::new();
     let mut line = 0usize;
@@ -463,6 +495,8 @@ mod tests {
             ("yaml", &YAML),
             ("html", &HTML),
             ("css", &CSS),
+            ("sql", &SQL),
+            ("graphql", &GRAPHQL),
         ];
         for (name, lang) in all {
             assert!(lang.config().is_some(), "{name} config failed to build");
@@ -476,6 +510,9 @@ mod tests {
         assert!(language_for_path("lib/foo/bar.ex").is_some());
         assert!(language_for_path("mix.EXS").is_some()); // case-insensitive
         assert!(language_for_path("index.d.ts").is_some());
+        assert!(language_for_path("db/schema.sql").is_some());
+        assert!(language_for_path("api/schema.graphql").is_some());
+        assert!(language_for_path("api/query.gql").is_some());
         assert!(language_for_path("Makefile").is_none());
         assert!(language_for_path("logo.png").is_none());
         assert!(language_for_path(".gitignore").is_none());
@@ -528,6 +565,28 @@ mod tests {
         assert!(lines[0].iter().any(|&(_, t)| t == Token::Namespace));
         // :ok is an atom → string.special.symbol → Constant.
         assert!(lines[1].iter().any(|&(_, t)| t == Token::Constant));
+    }
+
+    #[test]
+    fn sql_and_graphql_highlight() {
+        let sql = language_for_path("q.sql").unwrap();
+        let lines = highlight_lines(sql, "SELECT id FROM users -- note\nWHERE ok = 't';");
+        // `SELECT`/`FROM` keywords, `users` table → type, `-- note` line comment
+        // (the `@spell` strip keeps line comments from falling back to plain).
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Keyword));
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Type));
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Comment));
+        // The `'t'` string literal.
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::String));
+
+        let graphql = language_for_path("s.graphql").unwrap();
+        let lines = highlight_lines(graphql, "type Query {\n  hero(id: ID!): String\n}");
+        // `type` keyword, `Query` named type.
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Keyword));
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Type));
+        // `hero` field → property, `ID`/`String` → type.
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::Property));
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::Type));
     }
 
     #[test]

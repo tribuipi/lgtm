@@ -34,6 +34,7 @@ cargo run --release
 - minimap,
 - inline GitHub review comments (reading + posting, hover a line for +)
 - submitting reviews (approve / request changes / comment, `cmd-enter` or the Review button)
+- settings: built-in themes, UI + code font, font size (`cmd-,`), persisted to config
 
 Coming: LSP, AI inline review annotations
 
@@ -51,6 +52,7 @@ Coming: LSP, AI inline review annotations
 | `m` | toggle minimap |
 | `c` | toggle inline comments |
 | `cmd-j` | chat with Claude Code |
+| `cmd-,` | open settings (theme / fonts / size) |
 | `r` | refresh active item |
 | `cmd-enter` | submit review (approve / request changes / comment) |
 | `home` / `end` | top / bottom |
